@@ -1,0 +1,6 @@
+{
+  "chrome_binary": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "profile_dir": "profile_gemini",
+  "cdp_port": 9222,
+  "headless": false
+}
