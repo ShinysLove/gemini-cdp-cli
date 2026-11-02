@@ -25,4 +25,5 @@ arboard = "3.4"
 
 # Парсер Markdown для разметки ответов
 pulldown-cmark = "0.12"
+unicode-width = "0.2"
 base64 = "0.21.7"
