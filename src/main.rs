@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph},
     Frame, Terminal,
 };
 use ratatui_image::picker::Picker;
@@ -653,25 +653,22 @@ impl ChromeBridge {
                             const rawCode = codeEl ? codeEl.innerText : node.innerText;
                             return '\n```' + lang + '\n' + rawCode.trim() + '\n```\n\n';
                         }}
-                        case 'ul': {{
-                            let out = [];
-                            for (const li of node.children) {{
-                                if (li.tagName.toLowerCase() === 'li') {{
-                                    out.push('* ' + nodeToMarkdown(li).trim());
-                                }}
-                            }}
-                            return out.join('\n') + '\n\n';
-                        }}
+                        case 'ul':
                         case 'ol': {{
+                            // Вложенные списки и многострочные пункты сдвигаются на 4 пробела,
+                            // чтобы Markdown сохранил их структуру.
+                            const ordered = tag === 'ol';
                             let out = [];
-                            let num = 1;
+                            let num = parseInt(node.getAttribute('start') || '1', 10) || 1;
                             for (const li of node.children) {{
-                                if (li.tagName.toLowerCase() === 'li') {{
-                                    out.push(num + '. ' + nodeToMarkdown(li).trim());
-                                    num++;
-                                }}
+                                if (li.tagName.toLowerCase() !== 'li') continue;
+                                const marker = ordered ? (num++) + '. ' : '* ';
+                                const body = nodeToMarkdown(li).split('\n').filter(l => l.trim() !== '');
+                                if (body.length === 0) continue;
+                                out.push(marker + body[0].trim());
+                                for (const l of body.slice(1)) out.push('    ' + l);
                             }}
-                            return out.join('\n') + '\n\n';
+                            return '\n' + out.join('\n') + '\n\n';
                         }}
                         case 'li':
                             return childrenMd();
@@ -888,6 +885,14 @@ async fn main() -> Result<()> {
                                 let _ = bridge.set_thinking_level(state.thinking_mode).await;
                             }
 
+                            // Перенос строки в сообщении: Shift+Enter / Ctrl+Enter (или Ctrl+J, если терминал их не различает).
+                            (KeyCode::Enter, m) if m.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
+                                state.input.push('\n');
+                            }
+                            (KeyCode::Char('j') | KeyCode::Char('о'), KeyModifiers::CONTROL) => {
+                                state.input.push('\n');
+                            }
+
                             (KeyCode::Enter, KeyModifiers::NONE) => {
                                 let query = state.input.trim().to_string();
                                 if (!query.is_empty() || state.pending_image.is_some()) && !state.is_streaming {
@@ -1060,8 +1065,111 @@ fn try_simple_image_path(text: &str) -> Option<PathBuf> {
     }
 }
 
+const MAX_INPUT_LINES: usize = 8;
+const IMAGE_PREVIEW_WIDTH: u16 = 26;
+
+/// Строки поля ввода с переносом. Ширина берётся на 1 меньше, чтобы курсору всегда хватало места.
+fn input_lines(input: &str, inner_width: usize) -> Vec<Line<'static>> {
+    let width = inner_width.saturating_sub(1).max(4);
+    let mut out = Vec::new();
+    for (i, part) in input.split('\n').enumerate() {
+        let prefix = if i == 0 {
+            Span::styled("> ", Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("  ")
+        };
+        out.extend(markdown::wrap_line(
+            vec![prefix, Span::styled(part.to_string(), Style::default().fg(Color::White))],
+            2,
+            width,
+        ));
+    }
+    out
+}
+
+fn chat_lines(state: &AppState, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if state.messages.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(ACCENT_BLUE)),
+            Span::styled("Ready. Ask a question or paste an image.", Style::default().fg(Color::DarkGray)),
+        ]));
+        return lines;
+    }
+
+    for msg in &state.messages {
+        match msg.role {
+            Role::User => {
+                let mut text = msg.raw_content.clone();
+                if let Some(ref path) = msg.image_path {
+                    text.push_str(&format!("  [Image: {}]", path.file_name().unwrap_or_default().to_string_lossy()));
+                }
+                for (idx, part) in text.split('\n').enumerate() {
+                    let prefix = if idx == 0 {
+                        Span::styled("❯ ", Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::raw("  ")
+                    };
+                    let spans = vec![prefix, Span::styled(part.to_string(), Style::default().fg(Color::White))];
+                    // Сообщение пользователя — «плашка» с фоном на всю ширину.
+                    for mut line in markdown::wrap_line(spans, 2, width.saturating_sub(1)) {
+                        let fill = width.saturating_sub(line.width());
+                        line.spans.push(Span::raw(" ".repeat(fill)));
+                        for span in line.spans.iter_mut() {
+                            span.style = span.style.bg(CHAT_BG_USER);
+                        }
+                        lines.push(line);
+                    }
+                }
+            }
+            Role::Gemini => {
+                if msg.raw_content.is_empty() && state.is_streaming {
+                    let spinner_char = SPINNER_FRAMES[state.spinner_idx];
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{} ", spinner_char), Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("Thinking ({}) ...", state.thinking_mode.as_str()), Style::default().fg(Color::DarkGray)),
+                    ]));
+                } else {
+                    let displayed_text: String = msg.raw_content.chars().take(msg.displayed_chars).collect();
+                    let parsed = markdown::render_markdown(&displayed_text, width.saturating_sub(2));
+                    for (i, mut line) in parsed.into_iter().enumerate() {
+                        let lead = if i == 0 {
+                            Span::styled("● ", Style::default().fg(ACCENT_BLUE))
+                        } else {
+                            Span::raw("  ")
+                        };
+                        line.spans.insert(0, lead);
+                        lines.push(line);
+                    }
+
+                    if state.is_streaming && msg.displayed_chars < msg.raw_content.chars().count() {
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(SPINNER_FRAMES[state.spinner_idx], Style::default().fg(ACCENT_BLUE)),
+                        ]));
+                    }
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
 fn ui(f: &mut Frame, state: &mut AppState) {
     let has_image = state.attached_image_state.is_some();
+
+    // Высота поля ввода растёт вместе с текстом (до MAX_INPUT_LINES строк).
+    let input_outer_width = f
+        .area()
+        .width
+        .saturating_sub(2)
+        .saturating_sub(if has_image { IMAGE_PREVIEW_WIDTH } else { 0 });
+    let all_input_lines = input_lines(&state.input, input_outer_width.saturating_sub(2) as usize);
+    let visible_input = all_input_lines.len().min(MAX_INPUT_LINES);
+    let input_height = visible_input as u16 + 2;
+    let bottom_height = if has_image { input_height.max(9) } else { input_height };
 
     let root_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1069,7 +1177,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         .constraints([
             Constraint::Length(12),
             Constraint::Min(8),
-            Constraint::Length(if has_image { 9 } else { 3 }),
+            Constraint::Length(bottom_height),
         ])
         .split(f.area());
 
@@ -1141,113 +1249,29 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     f.render_widget(right_widget, inner_header[1]);
 
     // --- Chat History ---
-    let mut formatted_lines: Vec<Line> = Vec::new();
+    let chat_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(30, 50, 90)))
+        .title(Span::styled(" Chat History ", Style::default().fg(Color::DarkGray)));
+    let chat_inner = chat_block.inner(root_layout[1]);
+    // Строки уже перенесены под ширину, поэтому прокрутка считается точно.
+    let formatted_lines = chat_lines(state, chat_inner.width.saturating_sub(1) as usize);
 
-    if state.messages.is_empty() {
-        formatted_lines.push(Line::from(vec![
-            Span::styled("  ● ", Style::default().fg(ACCENT_BLUE)),
-            Span::styled("Ready. Ask a question or paste an image.", Style::default().fg(Color::DarkGray)),
-        ]));
-    } else {
-        for msg in &state.messages {
-            match msg.role {
-                Role::User => {
-                    let img_badge = if let Some(ref path) = msg.image_path {
-                        format!(" [Image: {}]", path.file_name().unwrap_or_default().to_string_lossy())
-                    } else {
-                        String::new()
-                    };
-
-                    for (idx, line) in msg.raw_content.lines().enumerate() {
-                        let content = if idx == 0 && !img_badge.is_empty() {
-                            format!("  {}{}", line, img_badge)
-                        } else {
-                            format!("  {}", line)
-                        };
-                        formatted_lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("{:<100}", content),
-                                Style::default().fg(Color::White).bg(CHAT_BG_USER),
-                            ),
-                        ]));
-                    }
-                }
-                Role::Gemini => {
-                    if msg.raw_content.is_empty() && state.is_streaming {
-                        let spinner_char = SPINNER_FRAMES[state.spinner_idx];
-                        formatted_lines.push(Line::from(vec![
-                            Span::styled(format!("{} ", spinner_char), Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!("Thinking ({}) ...", state.thinking_mode.as_str()), Style::default().fg(Color::DarkGray)),
-                        ]));
-                    } else {
-                        let displayed_text: String = msg.raw_content.chars().take(msg.displayed_chars).collect();
-                        let parsed = markdown::parse_markdown_to_lines(&displayed_text);
-                        for (i, mut line) in parsed.into_iter().enumerate() {
-                            if i == 0 {
-                                line.spans.insert(0, Span::styled("● ", Style::default().fg(ACCENT_BLUE)));
-                            } else {
-                                line.spans.insert(0, Span::raw("  "));
-                            }
-                            formatted_lines.push(line);
-                        }
-
-                        if state.is_streaming && msg.displayed_chars < msg.raw_content.chars().count() {
-                            let spinner_char = SPINNER_FRAMES[state.spinner_idx];
-                            formatted_lines.push(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(spinner_char, Style::default().fg(ACCENT_BLUE)),
-                            ]));
-                        }
-                    }
-                }
-            }
-            formatted_lines.push(Line::from(""));
-        }
-    }
-
-    let chat_area_height = root_layout[1].height.saturating_sub(2) as usize;
-    let total_lines = formatted_lines.len();
-    let scroll_y = if total_lines > chat_area_height {
-        let max_scroll = (total_lines - chat_area_height) as u16;
-        max_scroll.saturating_sub(state.scroll)
-    } else {
-        0
-    };
+    let max_scroll = formatted_lines.len().saturating_sub(chat_inner.height as usize);
+    state.scroll = state.scroll.min(max_scroll.min(u16::MAX as usize) as u16);
+    let scroll_y = (max_scroll - state.scroll as usize).min(u16::MAX as usize) as u16;
 
     let chat_widget = Paragraph::new(formatted_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(30, 50, 90)))
-                .title(Span::styled(" Chat History ", Style::default().fg(Color::DarkGray))),
-        )
-        .wrap(Wrap { trim: false })
+        .block(chat_block)
         .scroll((scroll_y, 0));
     f.render_widget(chat_widget, root_layout[1]);
 
     // --- Bottom Input Area ---
-    if has_image {
+    let input_area = if has_image {
         let bottom_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(20), Constraint::Length(26)])
+            .constraints([Constraint::Min(20), Constraint::Length(IMAGE_PREVIEW_WIDTH)])
             .split(root_layout[2]);
-
-        let prompt_lines = vec![
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD)),
-                Span::styled(&state.input, Style::default().fg(Color::White)),
-            ]),
-        ];
-        let input_widget = Paragraph::new(prompt_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_BLUE))
-                .title(Span::styled(
-                    format!(" Message [Tab: Thinking {}] ", state.thinking_mode.as_str()),
-                    Style::default().fg(ACCENT_CYAN),
-                )),
-        );
-        f.render_widget(input_widget, bottom_chunks[0]);
 
         if let Some(ref mut img_state) = state.attached_image_state {
             let block = Block::default()
@@ -1261,22 +1285,34 @@ fn ui(f: &mut Frame, state: &mut AppState) {
             let img_widget = StatefulImage::new(None);
             f.render_stateful_widget(img_widget, inner_area, img_state);
         }
+        bottom_chunks[0]
     } else {
-        let prompt_lines = vec![
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(ACCENT_BLUE).add_modifier(Modifier::BOLD)),
-                Span::styled(&state.input, Style::default().fg(Color::White)),
-            ]),
-        ];
-        let input_widget = Paragraph::new(prompt_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_BLUE))
-                .title(Span::styled(
-                    format!(" Input [Tab: Thinking {}] (Paste image or text path) ", state.thinking_mode.as_str()),
-                    Style::default().fg(ACCENT_CYAN),
-                )),
-        );
-        f.render_widget(input_widget, root_layout[2]);
-    }
+        root_layout[2]
+    };
+
+    let title = if has_image {
+        format!(" Message [Tab: Thinking {}] [Shift+Enter: new line] ", state.thinking_mode.as_str())
+    } else {
+        format!(
+            " Input [Tab: Thinking {}] [Shift+Enter: new line] (Paste image or text path) ",
+            state.thinking_mode.as_str()
+        )
+    };
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_BLUE))
+        .title(Span::styled(title, Style::default().fg(ACCENT_CYAN)));
+    let input_inner = input_block.inner(input_area);
+
+    // Показываем последние строки ввода, чтобы курсор всегда был виден.
+    let skip = all_input_lines.len() - visible_input;
+    let shown: Vec<Line<'static>> = all_input_lines.into_iter().skip(skip).collect();
+    let cursor_x = shown.last().map(|l| l.width()).unwrap_or(0) as u16;
+    let cursor_y = shown.len().saturating_sub(1) as u16;
+
+    f.render_widget(Paragraph::new(shown).block(input_block), input_area);
+    f.set_cursor_position((
+        (input_inner.x + cursor_x).min(input_inner.right().saturating_sub(1)),
+        (input_inner.y + cursor_y).min(input_inner.bottom().saturating_sub(1)),
+    ));
 }
