@@ -288,102 +288,16 @@ impl ChromeBridge {
         Ok(info)
     }
 
+    /// Выбирает уровень рассуждений в меню режима Gemini. Возвращает true, если сайт принял выбор.
     async fn set_thinking_level(&mut self, mode: ThinkingMode) -> Result<bool> {
-        let level_name = match mode {
-            ThinkingMode::Low => "low",
-            ThinkingMode::Medium => "medium",
-            ThinkingMode::High => "high",
+        let level = match mode {
+            ThinkingMode::Low => "0",
+            ThinkingMode::Medium => "1",
+            ThinkingMode::High => "2",
         };
-
-        let script = format!(
-            r###"
-            (async () => {{
-                try {{
-                    const target = "{level}".toLowerCase();
-
-                    // 1. Поиск кнопки модели в шапке Gemini
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const pickerBtn = buttons.find(b => {{
-                        const txt = (b.innerText || '').toLowerCase();
-                        return (txt.includes('flash') || txt.includes('pro') || txt.includes('argon') || txt.includes('gemini'))
-                            && (b.getAttribute('aria-haspopup') === 'menu' || b.querySelector('mat-icon, svg, [data-icon-name*="arrow"]'));
-                    }}) || buttons.find(b => {{
-                        const txt = (b.innerText || '').toLowerCase();
-                        return txt.includes('flash') || txt.includes('gemini');
-                    }});
-
-                    if (!pickerBtn) return false;
-
-                    // Открытие выпадающего меню, если еще не открыто
-                    let menu = document.querySelector('[role="menu"]') || document.querySelector('.mat-mdc-menu-panel');
-                    if (!menu) {{
-                        pickerBtn.click();
-                        await new Promise(r => setTimeout(r, 100));
-                        menu = document.querySelector('[role="menu"]') || document.querySelector('.mat-mdc-menu-panel');
-                    }}
-                    if (!menu) return false;
-
-                    const getThinkingRow = () => {{
-                        const elements = Array.from(menu.querySelectorAll('*'));
-                        return elements.find(el => {{
-                            const t = (el.innerText || '').trim();
-                            return t.startsWith('Thinking level') && (el.tagName === 'BUTTON' || el.getAttribute('role') === 'menuitem' || el.classList.contains('mat-mdc-menu-item') || el.children.length > 0);
-                        }});
-                    }};
-
-                    const isListExpanded = () => {{
-                        const text = menu.innerText || '';
-                        return text.includes('Quick and efficient') || text.includes('Balanced depth') || text.includes('Extra thorough');
-                    }};
-
-                    // 2. Раскрытие аккордеона, если свернут
-                    let thinkingRow = getThinkingRow();
-                    if (!isListExpanded() && thinkingRow) {{
-                        thinkingRow.click();
-                        await new Promise(r => setTimeout(r, 100));
-                    }}
-
-                    // 3. Выбор целевого уровня
-                    const options = Array.from(menu.querySelectorAll('*'));
-                    const targetOption = options.find(el => {{
-                        const t = (el.innerText || '').trim().toLowerCase();
-                        if (target === 'low') return t.startsWith('low') || t.includes('quick and efficient');
-                        if (target === 'medium') return t.startsWith('medium') || t.includes('balanced depth');
-                        if (target === 'high') return t.startsWith('high') || t.includes('extra thorough');
-                        return false;
-                    }});
-
-                    if (targetOption) {{
-                        targetOption.click();
-                        await new Promise(r => setTimeout(r, 100));
-                    }}
-
-                    // 4. Сворачивание Thinking level обратно для фиксации режима
-                    thinkingRow = getThinkingRow();
-                    if (thinkingRow && isListExpanded()) {{
-                        thinkingRow.click();
-                        await new Promise(r => setTimeout(r, 100));
-                    }}
-
-                    // 5. Закрытие меню
-                    const backdrop = document.querySelector('.cdk-overlay-backdrop');
-                    if (backdrop) {{
-                        backdrop.click();
-                    }} else {{
-                        document.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }}));
-                    }}
-
-                    return true;
-                }} catch(e) {{
-                    return false;
-                }}
-            }})()
-            "###,
-            level = level_name
-        );
-
+        let script = SET_THINKING_LEVEL_JS.replace("__LEVEL__", level);
         let res = self.evaluate(&script).await?;
-        Ok(res.as_bool().unwrap_or(false))
+        Ok(res.as_str() == Some("ok"))
     }
 
     async fn fetch_usage_info(&mut self) -> Result<String> {
@@ -767,6 +681,9 @@ async fn main() -> Result<()> {
 
     let (mut bridge, account) = ChromeBridge::start(&config).await?;
 
+    // Программа стартует с уровнем «Low» — выставляем его и на сайте, чтобы индикатор не расходился с Gemini.
+    let _ = bridge.set_thinking_level(ThinkingMode::Low).await;
+
     let initial_usage = bridge
         .fetch_usage_info()
         .await
@@ -881,8 +798,11 @@ async fn main() -> Result<()> {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
 
                             (KeyCode::Tab, _) | (KeyCode::F(2), _) => {
-                                state.thinking_mode = state.thinking_mode.next();
-                                let _ = bridge.set_thinking_level(state.thinking_mode).await;
+                                // Индикатор меняется, только если сайт действительно принял новый уровень.
+                                let next = state.thinking_mode.next();
+                                if let Ok(true) = bridge.set_thinking_level(next).await {
+                                    state.thinking_mode = next;
+                                }
                             }
 
                             // Перенос строки в сообщении: Shift+Enter / Ctrl+Enter (или Ctrl+J, если терминал их не различает).
@@ -1316,3 +1236,66 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         (input_inner.y + cursor_y).min(input_inner.bottom().saturating_sub(1)),
     ));
 }
+
+/// Скрипт выбора уровня рассуждений. Опирается на атрибуты разметки, а не на текст,
+/// поэтому работает при любом языке интерфейса Gemini. __LEVEL__: 0 — низкий, 1 — средний, 2 — высокий.
+const SET_THINKING_LEVEL_JS: &str = r##"
+(async () => {
+    const LEVEL = __LEVEL__; // 0 = низкий, 1 = средний, 2 = высокий
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const waitFor = async (fn, tries = 20) => {
+        for (let i = 0; i < tries; i++) {
+            const v = fn();
+            if (v) return v;
+            await sleep(50);
+        }
+        return null;
+    };
+    const picker = document.querySelector('[data-test-id="bard-mode-menu-button"]');
+    if (!picker) return 'no-picker';
+    const isOpen = () => picker.getAttribute('aria-expanded') === 'true';
+    const closeMenu = async () => {
+        if (!isOpen()) return;
+        const backdrop = document.querySelector('.cdk-overlay-backdrop');
+        if (backdrop) backdrop.click();
+        else picker.click();
+        await waitFor(() => !isOpen(), 10);
+        if (isOpen()) {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+        }
+    };
+    // Строка «Уровень рассуждений» помечена value="thinking_level" — это не зависит от языка интерфейса.
+    const findRow = () => {
+        const row = document.querySelector('[role="menuitem"][value="thinking_level"]');
+        return row && row.offsetParent !== null ? row : null;
+    };
+    try {
+        if (!isOpen()) picker.click();
+        const row = await waitFor(findRow);
+        if (!row) { await closeMenu(); return 'no-thinking-row'; }
+
+        // Подменю уровней: на него ссылается aria-controls строки. Порядок пунктов: низкий, средний, высокий.
+        const getOptions = () => {
+            const id = row.getAttribute('aria-controls');
+            const sub = id && document.getElementById(id);
+            const items = sub ? Array.from(sub.querySelectorAll('[role="menuitem"]')) : [];
+            return items.length >= 3 ? items : null;
+        };
+        if (row.getAttribute('aria-expanded') !== 'true') row.click();
+        const options = await waitFor(getOptions);
+        if (!options) { await closeMenu(); return 'no-options'; }
+
+        const target = options[LEVEL];
+        if (!target.classList.contains('selected')) {
+            target.click();
+            await waitFor(() => target.classList.contains('selected') || !target.isConnected);
+        }
+        const ok = target.classList.contains('selected') || !target.isConnected;
+        await closeMenu();
+        return ok ? 'ok' : 'not-selected';
+    } catch (e) {
+        await closeMenu();
+        return 'error: ' + e.message;
+    }
+})()
+"##;
