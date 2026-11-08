@@ -97,6 +97,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         })?;
         tokio::select! {
             event=events.recv()=>match event {
+                Ok(AgentEvent::ApplyStatus{message,..})=>status=message,
                 Ok(AgentEvent::Run(run))=>view=Some(run),
                 Ok(AgentEvent::Activity{..})=>{},
                 Ok(AgentEvent::Approval(request))=>{pending.insert(request.id.clone(),request);scroll=0;},

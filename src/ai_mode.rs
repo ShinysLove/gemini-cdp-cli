@@ -6,6 +6,12 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 pub const START_URL: &str = "https://www.google.com/search?udm=50";
+type ChallengeHandler = std::sync::Arc<dyn Fn(bool) + Send + Sync>;
+static CHALLENGE_HANDLER: std::sync::OnceLock<ChallengeHandler> = std::sync::OnceLock::new();
+pub fn install_challenge_handler(handler: ChallengeHandler) { let _ = CHALLENGE_HANDLER.set(handler); }
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+pub const INLINE_TEXT_LIMIT: usize = 12_000;
+pub fn needs_text_file(text: &str) -> bool { text.chars().count() > INLINE_TEXT_LIMIT }
 fn submission_accepted(before:&Snapshot,after:&Snapshot)->bool{
     // Old code-only replies can keep the heuristic busy flag set forever.
     // That is not evidence that the new prompt was sent.
@@ -43,6 +49,10 @@ pub fn is_search_url(url: &str) -> bool {
 pub struct Snapshot {
     #[serde(default)]
     pub draft: bool,
+    #[serde(default)]
+    pub captcha: bool,
+    #[serde(skip)]
+    pub paused: Duration,
     #[serde(default)]
     pub ready: bool,
     #[serde(default)]
@@ -86,6 +96,8 @@ impl Turn {
         }
     }
     pub fn update(&mut self, snapshot: Snapshot) -> Result<(String, bool)> {
+        self.started += snapshot.paused;
+        self.changed += snapshot.paused;
         if !snapshot.error.is_empty() {
             bail!("{}", snapshot.error);
         }
@@ -117,12 +129,16 @@ pub struct AiMode {
     browser: Browser,
     page: PageConfig,
     response_timeout: Duration,
+    pending_upload: Option<(Vec<std::path::PathBuf>, serde_json::Value)>,
+    challenge_handler: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
 }
 impl AiMode {
     pub async fn start(cfg: &Config) -> Result<Self> {
         let browser = Browser::start(cfg).await?;
         Ok(Self {
             browser,
+            pending_upload: None,
+            challenge_handler: CHALLENGE_HANDLER.get().cloned(),
             page: cfg.ai_mode.clone(),
             response_timeout: Duration::from_secs(cfg.response_timeout_secs.max(10)),
         })
@@ -138,16 +154,33 @@ impl AiMode {
         self.browser.evaluate(&script).await
     }
     pub async fn snapshot(&mut self) -> Result<Snapshot> {
-        let value=self.script("snapshot", "").await?;
+        let mut value: Snapshot = serde_json::from_value(self.script("snapshot", "").await?)?;
+        if value.captcha {
+            let started = Instant::now();
+            if let Some(handler) = &self.challenge_handler { handler(true); }
+            let result = async {
+                self.show_browser().await?;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    let current: Snapshot = serde_json::from_value(self.script("snapshot", "").await?)?;
+                    if !current.captcha && current.ready && is_search_url(&current.url) { return Ok::<_, anyhow::Error>(current); }
+                }
+            }.await;
+            if let Some(handler) = &self.challenge_handler { handler(false); }
+            value = result?;
+            value.paused = started.elapsed();
+            self.browser.take_rate_limit();
+        }
         if let Some(wait)=self.browser.take_rate_limit(){bail!("RATE_LIMITED:{wait}: Google returned HTTP 429");}
-        serde_json::from_value(value)
-            .context("Некорректный ответ адаптера AI Mode")
+        Ok(value)
     }
+    pub fn set_challenge_handler(&mut self, handler: std::sync::Arc<dyn Fn(bool) + Send + Sync>) { self.challenge_handler = Some(handler); }
     pub async fn wait_ready(&mut self) -> Result<()> {
-        let started = Instant::now();
+        let mut started = Instant::now();
         let mut ready_checks = 0;
         loop {
             let snapshot = self.snapshot().await?;
+            started += snapshot.paused;
             if !snapshot.error.is_empty() {
                 bail!("{}", snapshot.error);
             }
@@ -181,6 +214,17 @@ impl AiMode {
         if snapshot.busy && !(completed_text==Some(snapshot.text.as_str())&&!snapshot.generating) {
             bail!("Страница ещё генерирует ответ. Дождитесь завершения или начните новый диалог.");
         }
+        let text = if needs_text_file(text) {
+            let dir = std::env::temp_dir().join("evil-gemini-prompts").join(crate::agents::model::id("prompt"));
+            tokio::fs::create_dir_all(&dir).await?;
+            let path = dir.join("message.txt");
+            tokio::fs::write(&path, text.as_bytes()).await?;
+            let result = self.attach_files(std::slice::from_ref(&path)).await;
+            let _ = tokio::fs::remove_file(&path).await;
+            let _ = tokio::fs::remove_dir(&dir).await;
+            result?;
+            "Прочитай полный запрос из вложенного файла message.txt и выполни его."
+        } else { text };
         self.script("fill", text).await?;
         self.browser
             .command("Input.insertText", json!({"text":text}))
@@ -209,6 +253,7 @@ impl AiMode {
                 bail!("{}", current.error);
             }
             if submission_accepted(&snapshot,&current) {
+                self.pending_upload = None;
                 return Ok(Turn::new(snapshot, self.response_timeout));
             }
         }
@@ -218,6 +263,7 @@ impl AiMode {
         self.navigate(START_URL).await
     }
     async fn navigate(&mut self, url: &str) -> Result<()> {
+        self.pending_upload = None;
         let old_frame = self.browser.command("Page.getFrameTree", json!({})).await?;
         let old_loader = old_frame["frameTree"]["frame"]["loaderId"].clone();
         let navigation = self
@@ -268,26 +314,57 @@ impl AiMode {
         self.browser.command("Page.bringToFront", json!({})).await?;
         Ok(())
     }
-    pub fn from_browser(browser:Browser,cfg:&Config)->Self{Self{browser,page:cfg.ai_mode.clone(),response_timeout:Duration::from_secs(cfg.response_timeout_secs.max(10))}}
+    pub fn from_browser(browser:Browser,cfg:&Config)->Self{Self{browser,pending_upload:None,challenge_handler:CHALLENGE_HANDLER.get().cloned(),page:cfg.ai_mode.clone(),response_timeout:Duration::from_secs(cfg.response_timeout_secs.max(10))}}
     pub async fn stop_generation(&mut self)->Result<bool>{let script=format!("(()=>{{const selector={};const b=Array.from(document.querySelectorAll(selector)).find(e=>e.getClientRects().length);if(b){{b.click();return true;}}return false;}})()",serde_json::to_string(&self.page.stop_selector)?);Ok(self.browser.evaluate(&script).await?.as_bool().unwrap_or(false))}
     pub async fn attach_files(&mut self,files:&[std::path::PathBuf])->Result<()> {
         if files.is_empty(){return Ok(());}
+        self.script("open_upload", "").await?;
+        tokio::time::sleep(Duration::from_millis(350)).await;
         let root=self.browser.command("DOM.getDocument",json!({"depth":-1,"pierce":true})).await?;
         let node=self.browser.command("DOM.querySelector",json!({"nodeId":root["root"]["nodeId"],"selector":"input[type=file]"})).await?;
         let id=node["nodeId"].as_i64().filter(|n|*n!=0).context("This anonymous AI Mode page does not expose a file-upload input. Text files can still be included as context; PDF/image upload is unavailable in this session.")?;
         let attrs=self.browser.command("DOM.getAttributes",json!({"nodeId":id})).await?;
         let multiple=attrs["attributes"].as_array().is_some_and(|a|a.chunks(2).any(|pair|pair[0]=="multiple"));
         if files.len()>1&&!multiple{bail!("This page accepts one native file at a time; choose a single PDF/image");}
-        self.browser.command("DOM.setFileInputFiles",json!({"nodeId":id,"files":files})).await?;
-        let names:Vec<_>=files.iter().filter_map(|p|p.file_name().and_then(|n|n.to_str())).collect();
-        for _ in 0..60{tokio::time::sleep(Duration::from_millis(500)).await;let script=format!("(()=>{{const names={};const text=document.body.innerText;return names.every(n=>text.includes(n))&&!Array.from(document.querySelectorAll('[aria-busy=\"true\"], [role=\"progressbar\"]')).some(e=>e.getClientRects().length);}})()",serde_json::to_string(&names)?);if self.browser.evaluate(&script).await?.as_bool()==Some(true){return Ok(());}}
-        bail!("File upload was not confirmed by the page within 30 seconds")
+        let before = if let Some((previous, baseline)) = &self.pending_upload {
+            if previous == files { baseline.clone() } else { self.script("upload_state", "").await? }
+        } else { self.script("upload_state", "").await? };
+        if !self.pending_upload.as_ref().is_some_and(|(previous, _)| previous == files) {
+            self.browser.command("DOM.setFileInputFiles",json!({"nodeId":id,"files":files})).await?;
+            self.pending_upload = Some((files.to_vec(), before.clone()));
+        }
+        let names: Vec<_> = files.iter().filter_map(|p|p.file_name().and_then(|n|n.to_str())).collect();
+        let image_count = files.iter().filter(|p| p.extension().and_then(|e|e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png"|"jpg"|"jpeg"|"webp"|"gif"|"bmp"))).count();
+        let request = json!({"names":names,"before":before,"image_count":image_count}).to_string();
+        let started = Instant::now();
+        let mut confirmations = 0;
+        while started.elapsed() < UPLOAD_TIMEOUT {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if self.script("upload_confirm", &request).await?.as_bool() == Some(true) {
+                confirmations += 1;
+                if confirmations >= 2 { return Ok(()); }
+            } else { confirmations = 0; }
+        }
+        bail!("Google не подтвердил загрузку вложений за 120 секунд. Файлы сохранены; можно повторить отправку.")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_text_threshold_counts_unicode_characters() {
+        assert!(!needs_text_file(&"я".repeat(INLINE_TEXT_LIMIT)));
+        assert!(needs_text_file(&"я".repeat(INLINE_TEXT_LIMIT + 1)));
+        assert!(!needs_text_file("short message"));
+    }
+    #[test]
+    fn captcha_wait_does_not_consume_response_timeout() {
+        let mut turn = Turn::new(Snapshot::default(), Duration::from_secs(30));
+        turn.started = Instant::now() - Duration::from_secs(90);
+        let snapshot = Snapshot { paused: Duration::from_secs(80), ..Default::default() };
+        assert!(turn.update(snapshot).is_ok());
+    }
     #[test]
     fn stale_busy_reply_is_not_confirmation_of_a_new_submission(){
         let before=Snapshot{text:"old answer".into(),busy:true,response_count:1,..Default::default()};

@@ -43,6 +43,7 @@ enum UiEvent {
     Blur(bool),
     Toast(String),
     Agents(Value),
+    Challenge(bool),
 }
 
 fn root_dir() -> Result<PathBuf> {
@@ -146,7 +147,7 @@ pub fn run() -> Result<()> {
         .with_navigation_handler(move |url| url == local_url || url == "about:blank")
         .with_drag_drop_handler(move |event|{if let wry::DragDropEvent::Drop{paths,..}=event{let _=drop_tx.try_send(Command{action:"attach_paths".into(),files:paths.iter().map(|p|p.to_string_lossy().into_owned()).collect(),..Default::default()});}true})
         .with_ipc_handler(move |request| {
-            if request.body().len()>1_000_000{return;}
+            if request.body().len()>29_000_000{return;}
             if let Ok(command) = serde_json::from_str::<Command>(request.body()) {
                 match command.action.as_str() {
                     "drag" | "minimize" | "maximize" | "close" => {
@@ -216,6 +217,12 @@ pub fn run() -> Result<()> {
                     "window.agentReceive && window.agentReceive({value})"
                 ));
             }
+            Event::UserEvent(UiEvent::Challenge(active)) => {
+                let notice = if active { "Google запросил CAPTCHA. Пройдите проверку в Chrome. Приложение дождётся её завершения." } else { "Проверка завершена. Продолжаем работу." };
+                let value = serde_json::to_string(notice).unwrap();
+                let _ = webview.evaluate_script(&format!("window.challengeNotice({value}, {active})"));
+                if !active { window.set_minimized(false); window.set_focus(); }
+            }
             Event::UserEvent(UiEvent::Native(action)) => match action.as_str() {
                 "close" => *control = ControlFlow::Exit,
                 "minimize" => window.set_minimized(true),
@@ -231,6 +238,7 @@ pub fn run() -> Result<()> {
 }
 
 struct Session {
+    attachment_images: std::collections::HashMap<String, String>,
     history: History,
     phase: &'static str,
     status: String,
@@ -242,7 +250,7 @@ struct Session {
 impl Session {
     fn emit(&self, sent: bool) {
         let chats: Vec<Value> = self.history.chats.iter().map(|chat| json!({"id":chat.id,"title":chat.title,
-            "messages":chat.messages.iter().map(|m|json!({"role":m.role,"text":m.text,"html":if m.role=="assistant"{render_markdown(&m.text)}else{String::new()},"interrupted":m.interrupted})).collect::<Vec<_>>() })).collect();
+            "messages":chat.messages.iter().map(|m|json!({"role":m.role,"text":m.text,"html":if m.role=="assistant"{render_markdown(&m.text)}else{String::new()},"interrupted":m.interrupted,"attachments":m.attachments.iter().map(|a|json!({"id":a.id,"name":a.name,"mime":a.mime,"image":self.attachment_images.get(&a.id)})).collect::<Vec<_>>()})).collect::<Vec<_>>() })).collect();
         let _ = self.proxy.send_event(UiEvent::State(json!({"chats":chats,"active_id":self.history.active_id,"settings":self.history.settings,"busy":self.turn.is_some(),"phase":self.phase,"status":self.status,"error":self.error,"sent":sent})));
     }
     fn save(&mut self) {
@@ -283,6 +291,7 @@ async fn worker(
     proxy: EventLoopProxy<UiEvent>,
 ) {
     let mut session = Session {
+        attachment_images: std::collections::HashMap::new(),
         history,
         phase: "connecting",
         status: "Открываем Google AI Mode".into(),
@@ -293,6 +302,15 @@ async fn worker(
     };
     if session.history.active().is_none() {
         session.history.new_chat();
+    }
+    for chat in &session.history.chats {
+        for message in &chat.messages {
+            for file in &message.attachments {
+                if !session.attachment_images.contains_key(&file.id) {
+                    if let Ok(Some(image)) = file.image_data_url().await { session.attachment_images.insert(file.id.clone(), image); }
+                }
+            }
+        }
     }
     let mut provider: Option<AiMode> = None;
     let prefs_path = root.join("data/agents.json");
@@ -312,6 +330,8 @@ async fn worker(
             return;
         }
     };
+    let challenge_proxy = session.proxy.clone();
+    crate::ai_mode::install_challenge_handler(std::sync::Arc::new(move |active| { let _ = challenge_proxy.send_event(UiEvent::Challenge(active)); }));
     let bus = EventBus::default();
     let mut agent_events = bus.subscribe();
     let manager = AgentManager::new(
@@ -374,13 +394,35 @@ async fn worker(
                     if manager.snapshot().await.is_some_and(|r|!r.state.terminal()){session.error="Сначала завершите или отмените текущую задачу".into();session.emit(false);continue;}
                     match std::fs::canonicalize(&command.text){Ok(path)if path.is_dir()=>{workspace=path;navigation.select(workspace.clone());if let Err(error)=navigation.save(&navigation_path){session.fail(error);}let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"workspace","data":workspace})));},_=>session.fail(anyhow::anyhow!("Папка проекта не найдена"))}continue;
                 }
+                if command.action=="attach_clipboard" {
+                    if attachments.len() >= 10 { session.error = "Не более 10 вложений".into(); }
+                    else {
+                        match Attachment::from_clipboard(&command.id, &command.text, root.join("data/attachments"), prefs.max_attachment_bytes.min(20 * 1024 * 1024)).await {
+                            Ok(file) => attachments.push(file),
+                            Err(error) => session.error = format!("Вставка изображения: {error:#}"),
+                        }
+                    }
+                    let mut files = vec![];
+                    for file in &attachments {
+                        let mut value = serde_json::to_value(file).unwrap();
+                        value["image"] = json!(file.image_data_url().await.ok().flatten());
+                        files.push(value);
+                    }
+                    let _ = session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":files})));
+                    session.emit(false); continue;
+                }
                 if command.action=="attach_paths"{
                     let paths=if command.files.is_empty(){crate::attachments::parse_paths(&command.text)}else{command.files.iter().map(PathBuf::from).collect()};
                     for path in paths{if attachments.len()>=10{session.error="Не более 10 вложений".into();break;}match Attachment::prepare(path,root.join("data/attachments"),prefs.max_attachment_bytes).await{Ok(file)=>attachments.push(file),Err(error)=>{session.error=format!("Вложение: {error:#}");}}}
                     let mut files=vec![];for file in &attachments{let mut value=serde_json::to_value(file).unwrap();value["image"]=json!(file.image_data_url().await.ok().flatten());files.push(value);}
                     let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":files})));session.emit(false);continue;
                 }
-                if command.action=="remove_attachment"{attachments.retain(|a|a.id!=command.id);let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":attachments})));continue;}
+                if command.action=="remove_attachment"{
+                    attachments.retain(|a|a.id!=command.id);
+                    let mut files=vec![];
+                    for file in &attachments {let mut value=serde_json::to_value(file).unwrap();value["image"]=json!(file.image_data_url().await.ok().flatten());files.push(value);}
+                    let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":files})));continue;
+                }
                 if command.action=="agent_open_run" || command.action=="agent_detail" {
                     let current=manager.snapshot().await;
                     let run=if current.as_ref().is_some_and(|r|r.id==command.id){current}else{crate::workbench::read_run(&root.join("data/agent_runs"),&command.id).await.ok()};
@@ -415,12 +457,14 @@ async fn worker(
                 if command.action=="agent_cancel"{manager.cancel().await;continue;}
                 if command.action=="cancel_agent"{manager.cancel_agent(&command.id).await;continue;}
                 if command.action=="approval"{manager.approvals.decide(&command.id,command.allowed).await;continue;}
-                if command.action=="agent_apply"{if !manager.snapshot().await.is_some_and(|r|r.id==command.id){manager.bus.publish(AgentEvent::Error("Применение доступно только для текущей задачи".into()));continue;}let manager=manager.clone();tokio::spawn(async move{if let Err(error)=manager.request_apply(tokio_util::sync::CancellationToken::new()).await{manager.bus.publish(AgentEvent::Error(format!("Apply: {error:#}")));}});continue;}
+                if command.action=="agent_apply"{let manager=manager.clone();tokio::spawn(async move{if let Err(error)=manager.request_apply_run(&command.id,tokio_util::sync::CancellationToken::new()).await{manager.bus.publish(AgentEvent::Error(format!("Применение: {error:#}")));}});continue;}
                 if command.action=="init" || (command.action=="show_browser" && provider.is_none()) {
                     session.emit(false);
                     if provider.is_none() {
                         match connect().await {
                             Ok(mut connected)=>{
+                                let proxy = session.proxy.clone();
+                                connected.set_challenge_handler(std::sync::Arc::new(move |active| { let _ = proxy.send_event(UiEvent::Challenge(active)); }));
                                 let url=session.history.active().map(|c|c.url.clone()).unwrap_or_default();
                                 let result=if url.is_empty(){connected.new_chat().await}else{connected.open_chat(&url).await};
                                 provider=Some(connected);
@@ -472,21 +516,33 @@ async fn worker(
                         if text.is_empty(){continue;}
                         if text.len()>240_000 {session.error="Сообщение слишком длинное".into();session.emit(false);continue;}
                         session.error.clear();
-                        let mut attachment_error=None;for attachment in &attachments{if let Err(error)=attachment.verify().await{attachment_error=Some(error);break;}}
+                        let sent_attachments = if retry {session.history.active().and_then(|c|c.messages.iter().rev().find(|m|m.role=="user")).map(|m|m.attachments.clone()).unwrap_or_default()} else {attachments.clone()};
+                        let mut attachment_error=None;for attachment in &sent_attachments{if let Err(error)=attachment.verify().await{attachment_error=Some(error);break;}}
                         if let Some(error)=attachment_error{session.fail(error);continue;}
-                        let native:Vec<_>=attachments.iter().filter(|a|a.native_upload).map(|a|a.stored_path.clone()).collect();
+                        let native:Vec<_>=sent_attachments.iter().filter(|a|a.native_upload).map(|a|a.stored_path.clone()).collect();
                         if let Err(error)=ai.attach_files(&native).await{session.fail(error);continue;}
-                        let context=attachments.iter().filter(|a|!a.native_upload).map(|a|format!("\nUser-selected file {} (data):\n{}",a.name,a.preview)).collect::<Vec<_>>().join("\n");
+                        let mut context = String::new();
+                        let mut context_error = None;
+                        for file in sent_attachments.iter().filter(|a|!a.native_upload) {
+                            match tokio::fs::read_to_string(&file.stored_path).await {
+                                Ok(content) => context.push_str(&format!("\nUser-selected file {} (data):\n{}", file.name, content)),
+                                Err(error) => { context_error = Some(error); break; }
+                            }
+                        }
+                        if let Some(error) = context_error { session.fail(error.into()); continue; }
                         let sent_text=format!("{text}\n{context}");
                         match ai.send(&sent_text).await {
                             Ok(turn)=>{
+                                for file in &sent_attachments {
+                                    if let Ok(Some(image)) = file.image_data_url().await { session.attachment_images.insert(file.id.clone(), image); }
+                                }
                                 if let Some(chat)=session.history.active_mut() {
                                     if retry {if chat.messages.last().is_some_and(|m|m.role=="assistant"){chat.messages.pop();}}
-                                    else {chat.messages.push(Message {role:"user".into(),text:text.clone(),interrupted:false});}
+                                    else {chat.messages.push(Message {role:"user".into(),text:text.clone(),interrupted:false,attachments:sent_attachments.clone()});}
                                     if chat.title=="Новый диалог"{chat.title=text.replace('\n'," ").chars().take(45).collect();}
-                                    chat.messages.push(Message {role:"assistant".into(),text:String::new(),interrupted:false});
+                                    chat.messages.push(Message {role:"assistant".into(),text:String::new(),interrupted:false,attachments:vec![]});
                                 }
-                                session.turn=Some(turn);session.status="Google AI Mode отвечает".into();session.save();session.emit(!retry);attachments.clear();let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":[]})));
+                                session.turn=Some(turn);session.status="Google AI Mode отвечает".into();session.save();session.emit(!retry);if !retry {attachments.clear();let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"attachments","data":[]})));}
                             }
                             Err(error)=>session.fail(error),
                         }

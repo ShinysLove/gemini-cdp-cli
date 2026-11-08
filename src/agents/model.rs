@@ -140,6 +140,8 @@ pub struct ConversationMessage {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunView {
+    #[serde(default)]
+    pub applied: bool,
     pub id: String,
     pub goal: String,
     pub workspace: PathBuf,
@@ -155,6 +157,7 @@ impl RunView {
     /// Keep UI broadcasts small; full bounded transcripts remain in result.json.
     pub fn event_snapshot(&self) -> Self {
         let mut value = Self {
+            applied: self.applied,
             id: self.id.clone(),
             goal: self.goal.clone(),
             workspace: self.workspace.clone(),

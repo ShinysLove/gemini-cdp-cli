@@ -67,7 +67,7 @@ impl AgentManager {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n");
-        let prompt=format!("Response format for the task plan: JSON {{\"tasks\":[{{\"id\":\"analyze\",\"title\":\"...\",\"instruction\":\"...\",\"dependencies\":[],\"priority\":10}}]}}. Use 1–20 tasks, short ASCII IDs, explicit dependencies, parallel independent investigations, implementation after analysis, and final test verification. Project file names are reference data. Request: {}\nFiles: {}",crate::tools::truncate(goal,12000),names);
+        let prompt=format!("Response format for the task plan: exactly one JSON code block, no text outside it, containing {{\"tasks\":[{{\"id\":\"analyze\",\"title\":\"...\",\"instruction\":\"...\",\"dependencies\":[],\"priority\":10}}]}}. Use precisely the fields shown, encode instruction text as JSON strings with escaped newlines and quotes. Use 1–20 tasks, short ASCII IDs, explicit dependencies, parallel independent investigations, implementation after analysis, and final test verification. Project file names are reference data. Request: {}\nFiles: {}",crate::tools::truncate(goal,12000),names);
         let mut lease = self.sessions.acquire(&token).await?;
         self.sessions.gate.wait(&token).await?;
         let response = lease
@@ -211,6 +211,7 @@ impl AgentManager {
         *self.cancel.lock().await = token.clone();
         self.tokens.lock().await.clear();
         let view = Arc::new(RwLock::new(RunView {
+            applied: false,
             id: run_id.clone(),
             goal: goal.clone(),
             workspace: snapshot.source.clone(),
@@ -538,24 +539,48 @@ impl AgentManager {
         self.bus.publish(AgentEvent::Run(state.event_snapshot()));
     }
     pub async fn request_apply(&self, cancel: CancellationToken) -> Result<()> {
-        let _guard = self.apply_lock.lock().await;
-        let view = self
-            .snapshot()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("No run"))?;
-        if !view.state.terminal() || view.changes.is_empty() {
-            bail!("No completed change set available");
-        }
-        let allowed=self.approvals.request("integration",format!("Apply {} reviewed file changes to the selected source workspace? Run state: {:?}. Existing files may be replaced or deleted. The source is checked for concurrent edits first.",view.changes.len(),view.state),view.workspace.clone(),serde_json::json!({"tool":"apply_changes","changes":view.changes}),&cancel).await?;
-        if !allowed {
-            bail!("Source changes were not approved");
-        }
-        tokio::task::spawn_blocking(move || apply_changes(&view.workspace, &view.changes))
-            .await??;
-        self.bus.publish(AgentEvent::Progress {
-            agent_id: "integration".into(),
-            message: "Approved changes applied to source workspace".into(),
+        let view = self.snapshot().await.ok_or_else(|| anyhow::anyhow!("No run"))?;
+        self.request_apply_run(&view.id, cancel).await
+    }
+    pub async fn request_apply_run(&self, run_id: &str, cancel: CancellationToken) -> Result<()> {
+        let _guard = self.apply_lock.try_lock().map_err(|_| anyhow::anyhow!("Применение уже ожидает подтверждения или выполняется"))?;
+        let result = self.apply_run_inner(run_id, cancel).await;
+        self.bus.publish(AgentEvent::ApplyStatus {
+            run_id: run_id.into(), state: if result.is_ok() { "applied" } else { "failed" }.into(),
+            message: match &result { Ok(()) => "Изменения применены к проекту".into(), Err(error) => format!("Не удалось применить изменения: {error:#}") },
         });
+        result
+    }
+    async fn apply_run_inner(&self, run_id: &str, cancel: CancellationToken) -> Result<()> {
+        let mut view = match self.snapshot().await {
+            Some(current) if current.id == run_id => current,
+            _ => crate::workbench::read_run(&self.storage, run_id).await?,
+        };
+        if view.applied { bail!("Эти изменения уже применены"); }
+        if !view.state.terminal() || view.changes.is_empty() { bail!("Нет завершённого набора изменений"); }
+        let allowed = self.approvals.request("integration",
+            format!("Применить {} изменений к проекту? Перед записью исходные файлы будут проверены на изменения.", view.changes.len()),
+            view.workspace.clone(), serde_json::json!({"tool":"apply_changes","run_id":run_id,"changes":view.changes}), &cancel).await?;
+        if !allowed { bail!("Применение отменено или время подтверждения истекло"); }
+        self.bus.publish(AgentEvent::ApplyStatus {run_id:run_id.into(), state:"applying".into(), message:"Применяем изменения…".into()});
+        let source = view.workspace.clone();
+        let changes = view.changes.clone();
+        tokio::task::spawn_blocking(move || apply_changes(&source, &changes)).await??;
+        view.applied = true;
+        view.summary = view.summary.replace("Source files have not been modified.", "Changes applied to source workspace.");
+        if let Some(current) = self.view.read().await.as_ref() {
+            let mut current = current.write().await;
+            if current.id == view.id { current.applied = true; current.summary = view.summary.clone(); }
+        }
+        let folder = self.storage.join(run_id);
+        let saved = async {
+            let bytes = serde_json::to_vec_pretty(&view)?;
+            let temp = folder.join("result.json.tmp");
+            tokio::fs::write(&temp, bytes).await?;
+            tokio::fs::rename(temp, folder.join("result.json")).await?;
+            Ok::<_, anyhow::Error>(())
+        }.await;
+        if let Err(error) = saved { self.bus.publish(AgentEvent::Error(format!("Файлы применены, но статус в истории не сохранён: {error:#}"))); }
         Ok(())
     }
 }

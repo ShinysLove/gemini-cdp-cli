@@ -13,6 +13,35 @@ pub struct Attachment {
     pub native_upload: bool,
 }
 impl Attachment {
+    pub async fn from_clipboard(mime: &str, data: &str, storage: PathBuf, max: u64) -> Result<Self> {
+        use base64::Engine;
+        let ext = match mime {
+            "image/png" => "png", "image/jpeg" => "jpg", "image/webp" => "webp",
+            "image/gif" => "gif", "image/bmp" => "bmp",
+            _ => bail!("Unsupported clipboard media type: {mime}"),
+        };
+        if data.len() as u64 > max.saturating_add(2) / 3 * 4 { bail!("Clipboard image is too large"); }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(data).context("Invalid clipboard image")?;
+        if bytes.is_empty() || bytes.len() as u64 > max { bail!("Clipboard image is empty or too large"); }
+        let valid = match ext {
+            "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "jpg" => bytes.starts_with(b"\xff\xd8\xff"),
+            "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+            "webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
+            "bmp" => bytes.starts_with(b"BM"),
+            _ => false,
+        };
+        if !valid { bail!("Clipboard image header does not match its type"); }
+        let id = crate::agents::model::id("clipboard");
+        let name = format!("{id}.{ext}");
+        let dir = storage.join(&id);
+        tokio::fs::create_dir_all(&dir).await?;
+        let stored_path = dir.join(&name);
+        tokio::fs::write(&stored_path, &bytes).await?;
+        Ok(Self { id, name, size: bytes.len() as u64, mime: mime.into(),
+            preview: format!("{mime} · {} bytes", bytes.len()), sha256: crate::tools::digest(&bytes),
+            stored_path, native_upload: true })
+    }
     /// Called only on paths supplied by the user, never from a model tool call.
     pub async fn prepare(path: PathBuf, storage: PathBuf, max: u64) -> Result<Self> {
         tokio::task::spawn_blocking(move || {
@@ -96,7 +125,7 @@ impl Attachment {
     }
     pub async fn image_data_url(&self) -> Result<Option<String>> {
         use base64::Engine;
-        if !self.is_image() || self.size > 2 * 1024 * 1024 {
+        if !self.is_image() || self.size > 20 * 1024 * 1024 {
             return Ok(None);
         }
         self.verify().await?;
@@ -126,6 +155,35 @@ pub fn parse_paths(text: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn clipboard_images_are_snapshotted_and_validated() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nimage");
+        let file = Attachment::from_clipboard("image/png", &data, dir.path().into(), 100).await.unwrap();
+        assert!(file.native_upload);
+        assert!(file.name.ends_with(".png"));
+        file.verify().await.unwrap();
+        assert!(file.image_data_url().await.unwrap().unwrap().ends_with(&data));
+        assert!(Attachment::from_clipboard("image/png", &data, dir.path().into(), 5).await.is_err());
+        assert!(Attachment::from_clipboard("image/jpeg", &data, dir.path().into(), 100).await.is_err());
+        for (mime, data) in [("image/png", ""), ("image/png", "bad!"), ("video/mp4", "eA==")] {
+            assert!(Attachment::from_clipboard(mime, data, dir.path().into(), 100).await.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn photos_are_native_uploads_with_verified_previews() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        std::fs::write(&path, bytes).unwrap();
+        let file = Attachment::prepare(path, dir.path().join("uploads"), 1024).await.unwrap();
+        assert!(file.native_upload);
+        assert!(file.is_image());
+        assert!(file.image_data_url().await.unwrap().unwrap().starts_with("data:image/png;base64,"));
+        std::fs::write(&file.stored_path, b"changed").unwrap();
+        assert!(file.image_data_url().await.is_err());
+    }
     #[tokio::test]
     async fn validates_and_snapshots_user_files() {
         let dir = tempfile::tempdir().unwrap();

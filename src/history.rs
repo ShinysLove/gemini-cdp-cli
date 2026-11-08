@@ -13,6 +13,8 @@ pub struct Message {
     pub text: String,
     #[serde(default)]
     pub interrupted: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Chat {
@@ -147,6 +149,31 @@ pub fn render_markdown(text: &str) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn old_messages_load_without_attachments() {
+        let message: Message = serde_json::from_str(r#"{"role":"user","text":"hello"}"#).unwrap();
+        assert!(message.attachments.is_empty());
+    }
+    #[tokio::test]
+    async fn sent_photo_survives_history_reload_without_the_original_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("photo.png");
+        fs::write(&original, b"\x89PNG\r\n\x1a\nphoto").unwrap();
+        let file = crate::attachments::Attachment::prepare(original.clone(), dir.path().join("uploads"), 1024).await.unwrap();
+        let mut history = History::default();
+        history.new_chat();
+        history.active_mut().unwrap().messages.push(Message {
+            role: "user".into(), text: "Look at this".into(), interrupted: false, attachments: vec![file.clone()],
+        });
+        let path = dir.path().join("history.json");
+        history.save(&path).unwrap();
+        fs::remove_file(original).unwrap();
+        let loaded = History::load(&path).unwrap();
+        let message = &loaded.active().unwrap().messages[0];
+        assert_eq!(message.attachments[0].id, file.id);
+        assert!(message.attachments[0].image_data_url().await.unwrap().is_some());
+        assert!(!fs::read_to_string(&path).unwrap().contains("base64"));
+    }
+    #[test]
     fn model_html_and_script_links_cannot_execute() {
         let html = render_markdown("<script>alert(1)</script>\n\n[bad](javascript:alert%281%29)\n\n[good](https://example.com)");
         assert!(!html.contains("<script>"));
@@ -162,6 +189,7 @@ mod tests {
             role: "user".into(),
             text: "hello".into(),
             interrupted: false,
+            attachments: vec![],
         });
         history.new_chat();
         assert_ne!(first, history.active_id);

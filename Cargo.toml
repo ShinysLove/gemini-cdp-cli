@@ -1,6 +1,6 @@
 [package]
 name = "gemini-cdp-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 default-run = "evil-gemini"
 description = "EVIL GEMINI — a lightweight desktop client for Google AI Mode"

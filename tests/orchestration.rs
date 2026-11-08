@@ -460,6 +460,42 @@ async fn applying_source_requires_approval_and_rechecks_concurrent_edits() {
         "user edit"
     );
 }
+
+#[tokio::test]
+async fn saved_changes_can_be_confirmed_after_restart_without_duplicate_application() {
+    let source = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let (original, _, _) = setup(data.path(), 1, 1, false, 1);
+    original.start("Write".into(), source.path().into(), vec![], Some(TaskPlan {
+        tasks: vec![task("a", "WRITE:a.txt", &[])],
+    })).await.unwrap();
+    let completed = finish(&original).await;
+    let (manager, live, _) = setup(data.path(), 1, 1, false, 1);
+    for allowed in [false, true] {
+        let other = manager.clone();
+        let id = completed.id.clone();
+        let applying = tokio::spawn(async move { other.request_apply_run(&id, CancellationToken::new()).await });
+        let request = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = manager.approvals.pending().await.first() { break request.clone(); }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(!source.path().join("a.txt").exists());
+        assert_eq!(request.action["run_id"], completed.id);
+        // A second click must fail immediately, rather than queue another approval.
+        assert!(tokio::time::timeout(Duration::from_millis(100), manager.request_apply_run(&completed.id, CancellationToken::new())).await.unwrap().is_err());
+        assert_eq!(manager.approvals.pending().await.len(), 1);
+        assert!(manager.approvals.decide(&request.id, allowed).await);
+        assert_eq!(applying.await.unwrap().is_ok(), allowed);
+        let saved = gemini_cdp_cli::workbench::read_run(data.path(), &completed.id).await.unwrap();
+        assert_eq!(saved.applied, allowed);
+    }
+    assert_eq!(std::fs::read_to_string(source.path().join("a.txt")).unwrap(), "A");
+    assert!(manager.request_apply_run(&completed.id, CancellationToken::new()).await.is_err());
+    assert!(manager.approvals.pending().await.is_empty());
+    assert_eq!(live.load(Ordering::SeqCst), 0);
+}
 struct DriftFactory;
 struct DriftSession(usize);
 #[async_trait]

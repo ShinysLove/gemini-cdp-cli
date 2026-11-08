@@ -14,6 +14,7 @@ window.receive = incoming => {
  if(incoming.toast){toast(incoming.toast);return;}
  sending=false;$('prompt').readOnly=false;
  const previous=state.active_id;
+ const previousMessageCount=state.chats.find(c=>c.id===previous)?.messages.length||0;
  if(previous!==incoming.active_id){drafts.set(previous,$('prompt').value);$('prompt').value=drafts.get(incoming.active_id)||'';resizeInput();}
  state=incoming;
  if(incoming.sent){$('prompt').value='';drafts.delete(state.active_id);resizeInput();}
@@ -23,13 +24,13 @@ window.receive = incoming => {
  $('connection').className='connection '+(state.busy?'busy':state.phase);
  $('connection-text').textContent=state.busy?'Отвечает':state.phase==='ready'?'Готов к работе':state.phase==='error'?'Нет подключения':'Подключение';
  $('connection').title=state.status;
- const error=state.error||'';$('notice').hidden=!error;$('notice').textContent=error;
+ const error=state.error||'';if(!window.captchaActive){$('notice').hidden=!error;$('notice').textContent=error;}
  const chat=state.chats.find(c=>c.id===state.active_id);
  $('chat-title').textContent=chat?.messages.length?chat.title:'Новый диалог';
  const messages=chat?.messages||[];$('welcome').hidden=!!messages.length;
  const key=JSON.stringify([messages,state.busy,state.active_id]);
  if(key!==signature){signature=key;const container=$('conversation');const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;const last=messages.length-1;
- $('messages').innerHTML=messages.map((message,index)=>message.role==='user'?`<article class="message user"><div class="user-bubble">${escape(message.text)}</div></article>`:`<article class="message assistant ${message.interrupted?'interrupted':''}"><div class="assistant-label">${icon('star')}<span>EVIL GEMINI</span></div>${message.text?`<div class="assistant-content">${message.html}</div>`:state.busy?'<div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span>Разбираемся в деталях</div>':'<div class="assistant-content"><p>Ответ не получен.</p></div>'}${message.text?`<div class="message-actions"><button data-copy="${index}" title="Копировать ответ" aria-label="Копировать ответ">${icon('copy')}</button>${index===last&&!state.busy?`<button data-retry title="Повторить запрос" aria-label="Повторить запрос">${icon('retry')}</button>`:''}</div>`:''}</article>`).join('');
+ $('messages').innerHTML=messages.map((message,index)=>message.role==='user'?`<article class="message user ${previous===state.active_id&&index>=previousMessageCount?'message-enter':''}"><div class="user-message-content">${messageAttachmentsMarkup(message,index)}${message.text?`<div class="user-bubble">${escape(message.text)}</div>`:''}</div></article>`:`<article class="message assistant ${previous===state.active_id&&index>=previousMessageCount?'message-enter':''} ${message.interrupted?'interrupted':''}"><div class="assistant-label">${icon('star')}<span>EVIL GEMINI</span></div>${message.text?`<div class="assistant-content">${message.html}</div>`:state.busy?'<div class="thinking"><span class="thinking-dots"><i></i><i></i><i></i></span>Разбираемся в деталях</div>':'<div class="assistant-content"><p>Ответ не получен.</p></div>'}${message.text?`<div class="message-actions"><button data-copy="${index}" title="Копировать ответ" aria-label="Копировать ответ">${icon('copy')}</button>${index===last&&!state.busy?`<button data-retry title="Повторить запрос" aria-label="Повторить запрос">${icon('retry')}</button>`:''}</div>`:''}</article>`).join('');
  if(previous!==state.active_id||nearBottom||incoming.sent)requestAnimationFrame(()=>container.scrollTop=container.scrollHeight);
  }
  sidebar();updateSend();
@@ -40,7 +41,7 @@ $('composer').addEventListener('submit',event=>{event.preventDefault();if(state.
 const newChat=()=>sendCommand('new');$('new-chat').onclick=newChat;$('brand').onclick=newChat;
 $('search').oninput=sidebar;
 $('chat-list').onclick=event=>{const item=event.target.closest('[data-chat]');if(item)sendCommand('select',{id:item.dataset.chat});};
-$('messages').onclick=event=>{const copy=event.target.closest('[data-copy]');if(copy){const chat=state.chats.find(c=>c.id===state.active_id);sendCommand('copy',{text:chat.messages[Number(copy.dataset.copy)].text});}if(event.target.closest('[data-retry]'))sendCommand('retry');};
+$('messages').onclick=event=>{const preview=event.target.closest('[data-message-attachment]');if(preview){const [messageIndex,fileIndex]=preview.dataset.messageAttachment.split(':').map(Number);const file=state.chats.find(c=>c.id===state.active_id)?.messages[messageIndex]?.attachments?.[fileIndex];if(file)showAttachment(file);return;}const copy=event.target.closest('[data-copy]');if(copy){const chat=state.chats.find(c=>c.id===state.active_id);sendCommand('copy',{text:chat.messages[Number(copy.dataset.copy)].text});}if(event.target.closest('[data-retry]'))sendCommand('retry');};
 document.addEventListener('click',event=>{const link=event.target.closest('a');if(link){event.preventDefault();sendCommand('open_link',{text:link.getAttribute('href')||''});}});
 document.querySelectorAll('[data-prompt]').forEach(button=>button.onclick=()=>{$('prompt').value=button.dataset.prompt;resizeInput();$('prompt').focus();});
 $('toggle-sidebar').onclick=()=>{document.body.classList.toggle('sidebar-hidden');$('toggle-sidebar').setAttribute('aria-label',document.body.classList.contains('sidebar-hidden')?'Показать боковую панель':'Скрыть боковую панель');};
@@ -53,3 +54,55 @@ document.querySelectorAll('[data-window]').forEach(button=>button.onclick=()=>se
 $('drag-space').onmousedown=event=>{if(event.button===0)sendCommand('drag');};$('drag-space').ondblclick=()=>sendCommand('maximize');
 document.addEventListener('keydown',event=>{if(event.ctrlKey&&event.key.toLowerCase()==='n'){event.preventDefault();newChat();}if(event.ctrlKey&&event.key.toLowerCase()==='k'){event.preventDefault();$('search').focus();}if(event.key==='Escape'&&state.busy&&!$('settings-dialog').open)sendCommand('stop');});
 resizeInput();sendCommand('init_history');
+
+$('chat-attach').onclick=()=>sendCommand('choose_attachments');
+$('chat-attachments').onclick=event=>$('attachment-list').onclick(event);
+
+window.challengeNotice=(text,active)=>{window.captchaActive=active;$('notice').hidden=false;$('notice').textContent=text;if(!active)toast(text);};
+
+// Clipboard data is read only in response to a paste in a composer.
+function pasteMedia(event) {
+ const files=Array.from(event.clipboardData?.items||[]).filter(item=>item.kind==='file').map(item=>item.getAsFile()).filter(Boolean);
+ if(!files.length)return;
+ if(!event.clipboardData.getData('text/plain'))event.preventDefault();
+ for(const file of files){
+  if(!['image/png','image/jpeg','image/webp','image/gif','image/bmp'].includes(file.type)){toast('Этот формат медиа не поддерживается. Вставьте PNG, JPEG, WebP, GIF или BMP.');continue;}
+  if(!file.size||file.size>20*1024*1024){toast('Изображение должно быть размером от 1 байта до 20 МБ.');continue;}
+  const reader=new FileReader();
+  reader.onload=()=>{const data=String(reader.result||'');const comma=data.indexOf(',');if(comma<0){toast('Не удалось прочитать изображение из буфера.');return;}sendCommand('attach_clipboard',{id:file.type,text:data.slice(comma+1)});};
+  reader.onerror=()=>toast('Не удалось прочитать изображение из буфера.');
+  reader.readAsDataURL(file);
+ }
+}
+$('prompt').addEventListener('paste',pasteMedia);
+$('coding-goal').addEventListener('paste',pasteMedia);
+
+const surfaceAnimations=new WeakMap();
+function animateSurface(element,show=true,direction=1,onHidden=()=>{}) {
+ const previous=surfaceAnimations.get(element);if(previous)previous.cancel();
+ surfaceAnimations.delete(element);
+ if(show)element.hidden=false;
+ const reduced=typeof matchMedia==='function'&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+ if(reduced||typeof element.animate!=='function'){if(!show){element.hidden=true;onHidden();}return;}
+ const offset=direction*10;
+ const frames=[{opacity:0,transform:'translateX('+offset+'px)'},{opacity:1,transform:'translateX(0)'}];
+ const animation=element.animate(show?frames:frames.slice().reverse(),{duration:show?220:160,easing:'cubic-bezier(.2,.7,.2,1)'});
+ surfaceAnimations.set(element,animation);
+ animation.onfinish=()=>{if(surfaceAnimations.get(element)!==animation)return;surfaceAnimations.delete(element);if(!show){element.hidden=true;onHidden();}};
+}
+
+function attachmentMarkup(file){
+ const image=typeof file.image==='string'&&/^data:image\/(png|jpeg|webp|gif|bmp);base64,/.test(file.image)?file.image:null;
+ return '<span class="attachment-card '+(image?'has-image':'')+'"><button type="button" class="attachment-preview-button" data-preview="'+escape(file.id)+'" title="'+escape(file.name)+'">'+(image?'<img src="'+escape(image)+'" alt="'+escape(file.name)+'">':'<span class="attachment-file-icon" aria-hidden="true">▤</span>')+'<span class="attachment-name">'+escape(file.name)+'</span></button><button type="button" class="attachment-remove" data-remove="'+escape(file.id)+'" aria-label="Убрать вложение">×</button></span>';
+}
+
+function safeAttachmentImage(file){return typeof file.image==='string'&&/^data:image\/(png|jpeg|webp|gif|bmp);base64,/.test(file.image)?file.image:null;}
+function messageAttachmentsMarkup(message,index){
+ if(!message.attachments?.length)return '';
+ return '<div class="message-attachments">'+message.attachments.map((file,fileIndex)=>{const image=safeAttachmentImage(file);return '<button type="button" class="message-attachment '+(image?'has-image':'')+'" data-message-attachment="'+index+':'+fileIndex+'" title="'+escape(file.name)+'" aria-label="Открыть вложение '+escape(file.name)+'">'+(image?'<img src="'+escape(image)+'" alt="'+escape(file.name)+'">':'<span class="attachment-file-icon" aria-hidden="true">▤</span><span>'+escape(file.name)+'</span>')+'</button>';}).join('')+'</div>';
+}
+function showAttachment(file){
+ $('attachment-title').textContent=file.name;$('attachment-preview').replaceChildren();
+ const image=safeAttachmentImage(file);if(image){const element=document.createElement('img');element.src=image;element.alt=file.name;$('attachment-preview').append(element);}
+ const details=document.createElement('p');details.textContent=file.preview||file.mime||'Предпросмотр недоступен';$('attachment-preview').append(details);$('attachment-dialog').showModal();
+}

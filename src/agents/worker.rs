@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+pub const RESPONSE_FORMAT: &str = "Response format: exactly one JSON code block and no text outside it. Required fields: summary (string), done (boolean), actions (array). For an action request use done=false and 1–8 actions. For a final answer use done=true and actions=[]. Use only the available action names and their documented arguments. Put explanations and findings in summary. Encode code and file contents as JSON strings, escaping newlines and quotes correctly.";
 pub struct ContextManager;
 impl ContextManager {
     pub fn prompt(
@@ -35,7 +36,7 @@ impl ContextManager {
         } else {
             "Work in the provided project copy and check the results."
         };
-        format!("Response format: one JSON code block with summary (string), done (boolean), actions (array).\nRequest an action using done=false, for example: {{\"summary\":\"Inspect files\",\"done\":false,\"actions\":[{{\"tool\":\"list_directory\",\"path\":\".\"}}]}}. After receiving results, finish using {{\"summary\":\"Findings\",\"done\":true,\"actions\":[]}}. Up to 8 actions per response. Start with an action request.\nAvailable actions: {tools}.\nStage: {}. {scope}\nTask: {}\nReference findings: {}\nSelected file previews: {}",task.title,task.instruction,truncate(&serde_json::to_string(dependencies).unwrap_or_default(),20000),truncate(&files,32000))
+        format!("{RESPONSE_FORMAT}\nRequest an action using done=false, for example: {{\"summary\":\"Inspect files\",\"done\":false,\"actions\":[{{\"tool\":\"list_directory\",\"path\":\".\"}}]}}. After receiving results, finish using {{\"summary\":\"Findings\",\"done\":true,\"actions\":[]}}. Up to 8 actions per response. Start with an action request.\nAvailable actions: {tools}.\nStage: {}. {scope}\nTask: {}\nReference findings: {}\nSelected file previews: {}",task.title,task.instruction,truncate(&serde_json::to_string(dependencies).unwrap_or_default(),20000),truncate(&files,32000))
     }
 }
 #[derive(Debug, Deserialize)]
@@ -240,7 +241,7 @@ impl AgentWorker {
                         ),
                     )
                     .await;
-                    prompt=format!("Format correction: {error:#}. That response requested no executed actions. Please use one JSON code block with summary, done, actions. For action requests use done=false; for the final summary use done=true and actions=[]. Current task: {}.",self.task.instruction);
+                    prompt=format!("Format correction: {error:#}. That response requested no executed actions. {RESPONSE_FORMAT} Current task: {}.",self.task.instruction);
                     continue;
                 }
             };
@@ -255,7 +256,7 @@ impl AgentWorker {
                     "Completion rejected: no successful tool action has been recorded",
                 )
                 .await;
-                prompt=format!("An action result is needed before the final summary. Please request list_directory or read_file with done=false and actions, then use the returned result. Current task: {}. Response format: JSON summary/done/actions.",self.task.instruction);
+                prompt=format!("An action result is needed before the final summary. Please request list_directory or read_file with done=false and actions, then use the returned result. Current task: {}. {RESPONSE_FORMAT}",self.task.instruction);
                 continue;
             }
             failures = 0;
@@ -361,7 +362,7 @@ impl AgentWorker {
             for result in &mut results {
                 result.output = truncate(&result.output, per_result);
             }
-            prompt=format!("Current task: {}. {} Response format: JSON summary/done/actions. A final summary uses done=true and actions=[]. Action results:\n{}",self.task.instruction,if matches!(self.task.id.as_str(),"architecture"|"test-design"){"This is a read-only stage; report the findings after inspection."}else{"Use these results for the next action or final summary."},serde_json::to_string(&results)?);
+            prompt=format!("Current task: {}. {} {RESPONSE_FORMAT} Action results:\n{}",self.task.instruction,if matches!(self.task.id.as_str(),"architecture"|"test-design"){"This is a read-only stage; report the findings after inspection."}else{"Use these results for the next action or final summary."},serde_json::to_string(&results)?);
         }
         bail!("Agent exceeded {} tool rounds", self.prefs.max_steps)
     }
@@ -385,6 +386,19 @@ mod protocol_tests {
         assert!(!prompt.contains("You are"));
         assert!(prompt.contains("summary") && prompt.contains("actions"));
         assert!(!prompt.contains("run_command("));
+        assert!(prompt.contains(RESPONSE_FORMAT));
+        assert!(prompt.contains("no text outside it"));
+        assert!(prompt.contains("escaping newlines and quotes"));
+        assert!(!RESPONSE_FORMAT.to_lowercase().contains("evil"));
+    }
+    #[test]
+    fn response_format_examples_match_the_parser() {
+        let action = reply(r#"{"summary":"Inspect files","done":false,"actions":[{"tool":"list_directory","path":"."}]}"#).unwrap();
+        assert!(!action.done);
+        assert_eq!(action.actions.len(), 1);
+        let final_reply = reply("```json\n{\"summary\":\"Findings\",\"done\":true,\"actions\":[]}\n```").unwrap();
+        assert!(final_reply.done);
+        assert!(final_reply.actions.is_empty());
     }
     #[test]
     fn contradictory_completion_is_rejected_with_actionable_diagnostics() {

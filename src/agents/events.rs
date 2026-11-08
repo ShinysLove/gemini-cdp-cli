@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
+    ApplyStatus { run_id: String, state: String, message: String },
     Activity { agent_id: String, role: String, content: String },
     Plan(TaskPlan),
     Run(RunView),
