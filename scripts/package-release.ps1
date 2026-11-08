@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 foreach ($name in @('evil-gemini.exe', 'WebView2Loader.dll')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot "target/release/$name") -Destination (Join-Path $packageRoot $name) -Force
 }
-foreach ($name in @('README.md', 'config.json')) {
+foreach ($name in @('README.md', 'README.en.md', 'config.json')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $name) -Destination (Join-Path $packageRoot $name) -Force
 }
 @"
@@ -31,7 +31,7 @@ Chats, attachments, project reports and browser profiles are stored locally
 in this folder. No personal data or browser profile is included in this ZIP.
 Google CAPTCHA, when requested, must be completed manually in Chrome.
 
-See README.md for the chat, coding agents and approval controls.
+Documentation: README.md (Russian) / README.en.md (English).
 "@ | Set-Content -LiteralPath (Join-Path $packageRoot 'START-HERE.txt') -Encoding UTF8
 $archive = Join-Path $outputRoot "$packageName.zip"
 Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive -Force
