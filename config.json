@@ -1,6 +1,7 @@
 {
   "chrome_binary": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "profile_dir": "profile_gemini",
-  "cdp_port": 9222,
-  "headless": false
+  "profile_dir": "profile_ai_mode",
+  "cdp_port": 9223,
+  "headless": false,
+  "response_timeout_secs": 180
 }
