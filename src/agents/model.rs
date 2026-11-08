@@ -25,11 +25,13 @@ pub struct AgentPreferences {
     pub max_steps: usize,
     pub max_retries: usize,
     pub max_attachment_bytes: u64,
+    pub access_mode: crate::tools::AccessMode,
 }
 impl Default for AgentPreferences {
     fn default() -> Self {
         Self {
             workers: 3,
+            access_mode: crate::tools::AccessMode::AskForApproval,
             max_sessions: 2,
             min_request_interval_secs: 5,
             rate_limit_pause_secs: 60,
@@ -116,6 +118,10 @@ pub struct AgentOutput {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentView {
+    #[serde(default)]
+    pub input_chars: u64,
+    #[serde(default)]
+    pub output_chars: u64,
     pub id: String,
     pub task: TaskSpec,
     pub state: ExecutionState,
@@ -179,6 +185,8 @@ impl RunView {
                         .collect();
                 }
                 AgentView {
+                    input_chars: a.input_chars,
+                    output_chars: a.output_chars,
                     id: a.id.clone(),
                     task: a.task.clone(),
                     state: a.state.clone(),

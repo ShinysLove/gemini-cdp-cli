@@ -5,7 +5,7 @@ pub struct TaskPlanner;
 impl TaskPlanner {
     /// A bounded, dependency-aware fallback; callers can also supply a validated model-generated DAG.
     pub fn plan(goal: &str) -> TaskPlan {
-        let mut tasks=vec![TaskSpec{id:"architecture".into(),title:"Architecture and constraints".into(),instruction:format!("Analyze the project and this request: {goal}. Read relevant code. Identify exact files and integration risks. Do not modify files."),dependencies:vec![],priority:20},TaskSpec{id:"test-design".into(),title:"Tests and failure cases".into(),instruction:format!("Independently inspect the project for this request: {goal}. Identify meaningful regression tests and performance risks. Do not modify files."),dependencies:vec![],priority:10}];
+        let mut tasks=vec![TaskSpec{id:"architecture".into(),title:"Architecture and constraints".into(),instruction:format!("Analyze the project and this request: {goal}. Read relevant code. Identify exact files and integration risks. This is read-only analysis, not implementation. Never initialize a project or run commands. If the folder is empty, report that fact and finish with done=true and actions=[]."),dependencies:vec![],priority:20},TaskSpec{id:"test-design".into(),title:"Tests and failure cases".into(),instruction:format!("Independently inspect the project for this request: {goal}. Identify meaningful regression tests and performance risks. This is read-only analysis, not implementation. Never initialize a project or run commands. If the folder is empty, report that fact and finish with done=true and actions=[]."),dependencies:vec![],priority:10}];
         tasks.push(TaskSpec{id:"implementation".into(),title:"Implement changes".into(),instruction:format!("Implement the request using the dependency findings: {goal}. Read before editing. Edit only this isolated working copy. Run relevant build/tests through tools. Report actual results, not assumed success."),dependencies:vec!["architecture".into(),"test-design".into()],priority:5});
         tasks.push(TaskSpec{id:"verification".into(),title:"Verify integration".into(),instruction:"Review the combined implementation, inspect diffs, and run meaningful tests. Fix defects in the isolated copy if needed. Clearly report failures and unverified behavior.".into(),dependencies:vec!["implementation".into()],priority:0});
         TaskPlan { tasks }
@@ -113,6 +113,8 @@ mod tests {
             .tasks
             .into_iter()
             .map(|task| AgentView {
+                input_chars: 0,
+                output_chars: 0,
                 id: id("a"),
                 task,
                 state: ExecutionState::Queued,

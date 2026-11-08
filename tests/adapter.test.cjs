@@ -25,18 +25,20 @@ class Element {
 }
 const text=value=>({nodeType:3,textContent:value});
 const block=value=>new Element('div',[text(value)],{class:'n6owBd','data-complete':'true'});
-function fixture(complete, codeOnly=false) {
+function fixture(complete, codeOnly=false, refusal=false, staleRefusal=false) {
   const old=block('Old reply'); const first=block('First paragraph.');
   const second=block('Second paragraph.');
   // Google places rich blocks beside prose, outside the .n6owBd paragraphs.
   const code=new Element('div',[new Element('pre',[text('fn main() {}')])],{class:'rich-code'});
   const before=new Element('div',[old],{'data-container-id':'7'});before.complete=true;
   const current=new Element('div',codeOnly?[code]:[first,second,code],{'data-container-id':'8'});current.complete=complete;
+  const errorRoot=new Element('div',[],{'data-container-id':staleRefusal?'6':'9'});
+  const fallback=new Element('div',[text('Не удается дать ответ на этот поисковый запрос. Попробуйте спросить что-нибудь другое.')],{'data-subtree':'aimfl'});errorRoot.childNodes=[fallback];fallback.parentElement=errorRoot;
   const input=new Element('textarea');
   const config={input_selector:'inputs',response_selector:'responses',stop_selector:'stop',complete_selector:'actions'};
   const globals={URL,location:new URL('https://www.google.com/search?udm=50'),
     Node:{TEXT_NODE:3,ELEMENT_NODE:1},getComputedStyle:()=>({visibility:'visible'}),
-    document:{body:{innerText:''},querySelector:()=>null,querySelectorAll:selector=>selector==='inputs'?[input]:selector==='responses'?(codeOnly?[old,code]:[old,first,second]):[]}};
+    document:{body:{innerText:''},querySelector:()=>null,querySelectorAll:selector=>selector==='[data-container-id]'?(staleRefusal?[errorRoot,before,current]:[before,current,errorRoot]):selector==='[data-subtree="aimfl"]'&&(refusal||staleRefusal)?[fallback]:selector==='inputs'?[input]:selector==='responses'?(codeOnly?[old,code]:[old,first,second]):[]}};
   const adapter=vm.runInNewContext('('+fs.readFileSync('src/ai_mode.js','utf8')+')',globals);
   return adapter(config,'snapshot','');
 }
@@ -54,3 +56,5 @@ test('completed paragraphs do not mean the whole turn has finished',()=>{
   assert.equal(response.complete,false);assert.equal(response.busy,true);
 });
 test('a response containing only a code block still completes',()=>{const response=fixture(true,true);assert.equal(response.response_count,2);assert.equal(response.complete,true);assert.ok(response.text.includes('fn main() {}'));assert.ok(!response.text.includes('First paragraph'));});
+
+test('completed Google refusal is an actionable error, not an empty response timeout',()=>{assert.match(fixture(true,false,true).error,/SERVICE_REFUSAL/);assert.equal(fixture(true,false,false,true).error,'');});

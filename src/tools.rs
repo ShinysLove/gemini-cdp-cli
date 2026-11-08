@@ -214,13 +214,68 @@ pub struct ApprovalRequest {
 }
 #[derive(Clone)]
 pub struct ApprovalBroker {
+    mode: Arc<std::sync::atomic::AtomicU8>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     requests: Arc<Mutex<HashMap<String, ApprovalRequest>>>,
     bus: EventBus,
 }
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    #[default]
+    AskForApproval,
+    ApproveForMe,
+    FullAccess,
+}
+impl AccessMode {
+    pub fn allows(self, action: &serde_json::Value) -> bool {
+        if self == Self::FullAccess {
+            return true;
+        }
+        if self == Self::AskForApproval {
+            return false;
+        }
+        match action["tool"].as_str().unwrap_or("") {
+            "apply_patch" | "delete_file" => true, // Validated operations in a private copy.
+            "run_command" => {
+                let Some(args) = action["args"].as_array() else {
+                    return false;
+                };
+                action["program"] == "cargo"
+                    && args
+                        .first()
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| matches!(s, "check" | "build" | "test"))
+                    && args.iter().all(|v| {
+                        matches!(
+                            v.as_str(),
+                            Some(
+                                "check"
+                                    | "build"
+                                    | "test"
+                                    | "--locked"
+                                    | "--offline"
+                                    | "--release"
+                                    | "--all-targets"
+                                    | "--all-features"
+                                    | "--no-default-features"
+                                    | "--workspace"
+                            )
+                        )
+                    })
+            }
+            _ => false,
+        }
+    }
+}
 impl ApprovalBroker {
+    pub fn set_mode(&self, mode: AccessMode) {
+        self.mode
+            .store(mode as u8, std::sync::atomic::Ordering::SeqCst);
+    }
     pub fn new(bus: EventBus) -> Self {
         Self {
+            mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             pending: Default::default(),
             requests: Default::default(),
             bus,
@@ -234,6 +289,25 @@ impl ApprovalBroker {
         action: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<bool> {
+        if cancel.is_cancelled() {
+            return Ok(false);
+        }
+        let mode = match self.mode.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => AccessMode::ApproveForMe,
+            2 => AccessMode::FullAccess,
+            _ => AccessMode::AskForApproval,
+        };
+        if mode.allows(&action) {
+            self.bus.publish(AgentEvent::Activity {
+                agent_id: agent_id.into(),
+                role: "policy".into(),
+                content: format!(
+                    "Automatically allowed by selected {mode:?} policy: {}",
+                    truncate(&serde_json::to_string(&action)?, 8000)
+                ),
+            });
+            return Ok(true);
+        }
         let key = id("approval");
         let (tx, rx) = oneshot::channel();
         let request = ApprovalRequest {
@@ -960,6 +1034,43 @@ pub fn apply_changes(root: &Path, changes: &[FileChange]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn approval_modes_have_host_enforced_distinct_permissions() {
+        let build =
+            serde_json::json!({"tool":"run_command","program":"cargo","args":["test","--locked"]});
+        assert!(!AccessMode::AskForApproval.allows(&build));
+        assert!(AccessMode::ApproveForMe.allows(&build));
+        for action in [
+            serde_json::json!({"tool":"run_command","program":"cmd","args":["/c","del"]}),
+            serde_json::json!({"tool":"run_command","program":"cargo","args":["clean"]}),
+            serde_json::json!({"tool":"run_command","program":"cargo","args":["test","--target-dir","C:/outside"]}),
+            serde_json::json!({"tool":"apply_changes","changes":[]}),
+        ] {
+            assert!(!AccessMode::ApproveForMe.allows(&action));
+            assert!(AccessMode::FullAccess.allows(&action));
+        }
+        assert!(AccessMode::ApproveForMe
+            .allows(&serde_json::json!({"tool":"apply_patch","patch":"validated separately"})));
+    }
+    #[tokio::test]
+    async fn selected_full_access_is_applied_by_the_broker_without_fake_ui_approval() {
+        let broker = ApprovalBroker::new(EventBus::default());
+        broker.set_mode(AccessMode::FullAccess);
+        let result = broker
+            .request(
+                "agent",
+                "Explicitly enabled full access".into(),
+                PathBuf::from("C:/public"),
+                serde_json::json!({"tool":"run_command","program":"cargo","args":["test"]}),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(result);
+        assert!(broker.pending().await.is_empty());
+        let defaults: crate::agents::AgentPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.access_mode, AccessMode::AskForApproval);
+    }
     #[test]
     fn traversal_and_sensitive_paths_are_denied() {
         let root = tempfile::tempdir().unwrap();

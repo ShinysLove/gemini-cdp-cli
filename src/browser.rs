@@ -69,12 +69,37 @@ impl Browser {
                     .context("Не удалось запустить Chrome; проверьте chrome_binary")?,
             )
         };
+        let mut created_normal = false;
         for _ in 0..60 {
             if let Ok(response) = client.get(&endpoint).send().await {
                 if let Ok(targets) = response.json::<Vec<Value>>().await {
+                    // Ordinary chat must never attach to an agent's isolated tab.
+                    // Chrome lists private targets alongside normal pages in /json.
+                    let mut root = Self::connect_url(&Self::browser_endpoint(cfg).await?).await?;
+                    let contexts = root.command("Target.getBrowserContexts", json!({})).await?;
+                    let infos = root.command("Target.getTargets", json!({})).await?;
+                    let allowed = normal_targets(&contexts, &infos);
+                    if !created_normal
+                        && !targets.iter().any(|target| {
+                            allowed.contains(target["id"].as_str().unwrap_or(""))
+                                && crate::ai_mode::is_search_url(
+                                    target["url"].as_str().unwrap_or(""),
+                                )
+                        })
+                    {
+                        root.command(
+                            "Target.createTarget",
+                            json!({"url":crate::ai_mode::START_URL}),
+                        )
+                        .await?;
+                        created_normal = true;
+                    }
                     for target in targets {
                         let url = target["url"].as_str().unwrap_or_default();
-                        if target["type"] == "page" && crate::ai_mode::is_search_url(url) {
+                        if target["type"] == "page"
+                            && crate::ai_mode::is_search_url(url)
+                            && allowed.contains(target["id"].as_str().unwrap_or(""))
+                        {
                             if let Some(ws_url) = target["webSocketDebuggerUrl"].as_str() {
                                 let mut browser = Self::connect_url(ws_url).await?;
                                 browser._process = child;
@@ -194,6 +219,19 @@ impl Browser {
     }
 }
 
+fn normal_targets(contexts: &Value, targets: &Value) -> std::collections::HashSet<String> {
+    let private = contexts["browserContextIds"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    targets["targetInfos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|target| target["type"] == "page" && !private.contains(&target["browserContextId"]))
+        .filter_map(|target| target["targetId"].as_str().map(str::to_owned))
+        .collect()
+}
 fn retry_after(headers: &Value) -> u64 {
     let value = headers
         .as_object()
@@ -218,6 +256,15 @@ fn retry_after(headers: &Value) -> u64 {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    #[test]
+    fn chat_never_claims_an_agent_browser_context() {
+        let contexts = json!({"browserContextIds":["agent-context"]});
+        let targets = json!({"targetInfos":[{"targetId":"private","type":"page","browserContextId":"agent-context"},{"targetId":"chat","type":"page","browserContextId":"default"},{"targetId":"worker","type":"service_worker"}]});
+        let allowed = normal_targets(&contexts, &targets);
+        assert!(allowed.contains("chat"));
+        assert!(!allowed.contains("private"));
+        assert!(!allowed.contains("worker"));
+    }
     #[test]
     fn respects_retry_after_headers() {
         assert_eq!(retry_after(&json!({"Retry-After":"300"})), 300);

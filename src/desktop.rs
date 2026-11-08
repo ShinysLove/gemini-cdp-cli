@@ -117,9 +117,11 @@ pub fn run() -> Result<()> {
         .replace(
             "/*__CSS__*/",
             &format!(
-                "{}\n{}",
+                "{}\n{}\n{}\n{}",
                 include_str!("../ui/style.css"),
-                include_str!("../ui/agents.css")
+                include_str!("../ui/agents.css"),
+                include_str!("../ui/liquid-glass.css"),
+                include_str!("../ui/controls.css")
             ),
         )
         .replace(
@@ -360,6 +362,12 @@ async fn worker(
                     let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"preferences","data":&*manager.preferences.read().await,"workspace":workspace})));
                     if let Some(view)=manager.snapshot().await{let _=session.proxy.send_event(UiEvent::Agents(serde_json::to_value(AgentEvent::Run(view.event_snapshot())).unwrap()));}
                     for request in manager.approvals.pending().await{let _=session.proxy.send_event(UiEvent::Agents(serde_json::to_value(AgentEvent::Approval(request)).unwrap()));}continue;
+                }
+                if command.action=="set_access" {
+                    match serde_json::from_value::<crate::tools::AccessMode>(json!(command.text)) {
+                        Ok(mode)=>{manager.set_access_mode(mode).await;if let Err(error)=manager.preferences.read().await.save(&prefs_path){session.fail(error);}let _=session.proxy.send_event(UiEvent::Agents(json!({"type":"access","data":mode})));},
+                        Err(error)=>manager.bus.publish(AgentEvent::Error(format!("Unknown access mode: {error}")))
+                    }continue;
                 }
                 if command.action=="set_workers"{if let Err(error)=manager.set_workers(command.workers).await{session.fail(error);}else if let Err(error)=manager.preferences.read().await.save(&prefs_path){session.fail(error);}continue;}
                 if command.action=="set_workspace"{

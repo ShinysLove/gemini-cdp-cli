@@ -21,7 +21,7 @@
 <div class="app">
   <header class="titlebar" id="titlebar">
     <button class="icon-button" id="toggle-sidebar" aria-label="Скрыть боковую панель" title="Боковая панель"><svg><use href="#i-panel"/></svg></button>
-    <button class="brand" id="brand" title="Новый чат"><svg><use href="#i-star"/></svg><span>EVIL <b>GEMINI</b></span><span class="brand-tag">DESKTOP</span></button>
+    <button class="brand" id="brand" title="Новый чат"><svg><use href="#i-star"/></svg><span>EVIL <b>GEMINI</b></span><span class="brand-tag">Desktop</span></button>
     <div class="drag-space" id="drag-space"></div>
     <div class="connection" id="connection"><span class="status-dot"></span><span id="connection-text">Подключение</span></div>
     <div class="window-controls">
@@ -33,10 +33,10 @@
   <aside class="sidebar" id="sidebar"><div class="panel-resize sidebar-resize" id="sidebar-resize" role="separator" aria-label="Ширина боковой панели" tabindex="0"></div>
     <button class="new-chat" id="new-chat"><svg><use href="#i-plus"/></svg><span>Новый чат</span><kbd>Ctrl N</kbd></button>
     <label class="search-box"><svg><use href="#i-search"/></svg><input id="search" placeholder="Найти задачу или диалог" aria-label="Поиск задач и диалогов"><kbd>⌕</kbd></label>
-    <div class="section-label">ПРОЕКТЫ <button id="choose-workspace" title="Добавить проект" aria-label="Выбрать проект">＋</button></div>
+    <div class="section-label" data-nav="work">Проекты <button id="choose-workspace" title="Добавить проект" aria-label="Выбрать проект">＋</button></div>
     <nav id="project-list" aria-label="Проекты"></nav><div id="workspace-path" class="workspace-path"></div>
-    <div class="section-label">ЗАДАЧИ <button id="refresh-runs" aria-label="Обновить историю задач">↻</button></div><nav id="run-list" aria-label="История задач"></nav>
-    <div class="section-label">ДИАЛОГИ <span id="chat-count">0</span></div>
+    <div class="section-label" data-nav="work">Задачи <button id="refresh-runs" aria-label="Обновить историю задач">↻</button></div><nav id="run-list" aria-label="История задач"></nav>
+    <div class="section-label" data-nav="chat">Диалоги <span id="chat-count">0</span></div>
     <nav id="chat-list" aria-label="История диалогов"></nav>
     <div class="sidebar-bottom">
       <button class="settings-link" id="open-settings"><svg><use href="#i-settings"/></svg><span>Настройки</span><span class="settings-shortcut">↗</span></button>
@@ -44,11 +44,11 @@
     </div>
   </aside>
   <main class="workspace">
-    <div class="chat-toolbar"><div class="chat-heading"><span class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</span><h1 id="chat-title">Новый диалог</h1></div><button id="coding-toggle" class="provider-badge">Среда разработки</button><button class="provider-badge" id="open-google" title="Показать Google AI Mode"><svg><use href="#i-star"/></svg>Google AI Mode<svg class="small"><use href="#i-external"/></svg></button><button id="inspector-toggle" class="provider-badge" aria-label="Показать файлы и терминал">Файлы и терминал</button></div>
+    <div class="chat-toolbar"><div class="chat-heading"><span class="eyebrow">Рабочее пространство</span><h1 id="chat-title">Новый диалог</h1></div><div class="mode-switch" role="tablist" aria-label="Чат или работа"><button id="mode-chat" type="button" role="tab" aria-selected="false">Чат</button><button id="mode-work" type="button" role="tab" aria-selected="true">Работа</button></div><select id="access-mode" aria-label="Режим доступа"><option value="ask_for_approval">Ask for approval</option><option value="approve_for_me">Approve for me</option><option value="full_access">Full access</option></select><button id="coding-toggle" class="provider-badge" hidden>Среда разработки</button><button class="provider-badge" id="open-google" title="Показать Google AI Mode"><svg><use href="#i-star"/></svg>Google AI Mode<svg class="small"><use href="#i-external"/></svg></button><button id="inspector-toggle" class="provider-badge" aria-label="Показать файлы и терминал">Файлы и терминал</button></div>
     <section id="coding-panel" hidden>
       <div class="task-main">
         <div class="task-scroll" id="task-scroll">
-          <div id="task-welcome"><span class="welcome-label">EVIL GEMINI / CODING</span><h2>Что создадим сегодня?</h2><p>Выберите проект и опишите задачу.<br>Агенты исследуют код, подготовят изменения и запросят подтверждение команд.</p><div class="quick-prompts"><button data-goal="Изучи проект и предложи улучшения архитектуры с тестами.">Изучить проект ↗</button><button data-goal="Найди и исправь ошибку. Сначала проверь код и воспроизведи проблему.">Исправить ошибку ↗</button></div></div>
+          <div id="task-welcome"><span class="welcome-label">Работа с проектом</span><h2>Что создадим?</h2><p>Выберите проект и опишите задачу.<br>Агенты исследуют код, подготовят изменения и запросят подтверждение команд.</p><div class="quick-prompts"><button data-goal="Изучи проект и предложи улучшения архитектуры с тестами.">Изучить проект</button><button data-goal="Найди и исправь ошибку. Сначала проверь код и воспроизведи проблему.">Исправить ошибку</button></div></div>
           <div id="task-request" class="task-request" hidden></div>
           <div id="task-progress" hidden><div class="progress-heading"><strong id="run-status"></strong><span id="run-count"></span></div><progress id="overall-progress" max="100" value="0"></progress><div id="agent-capacity"></div></div>
           <div id="dag-view" aria-label="Зависимости этапов"></div>
@@ -58,13 +58,17 @@
         </div>
         <div class="input-dock">
           <div id="agent-notice" class="agent-notice" role="status"></div><div id="attachment-list" class="attachment-list"></div>
-          <div class="run-input"><textarea id="coding-goal" rows="2" maxlength="60000" placeholder="Опишите задачу для проекта…" aria-label="Задача разработки"></textarea>
+          <div class="run-input"><pre class="composer-pet" role="img" aria-label="Синий ASCII-помощник">  .----.
+ / o  o \
+ |  --  |
+ '------'
+   /__\</pre><textarea id="coding-goal" rows="2" maxlength="60000" placeholder="Опишите задачу для проекта…" aria-label="Задача разработки"></textarea>
             <div class="run-actions"><button id="choose-attachments" class="work-button" title="Прикрепить файлы">＋</button>
               <details id="worker-menu" class="composer-menu"><summary>Агенты <output id="agent-value">3</output>⌄</summary><div class="menu-panel"><strong>Число работников</strong><label for="agent-count">От 1 до 50 · общий пул Chrome</label><input type="range" id="agent-count" min="1" max="50" value="3" step="1" aria-label="Количество агентов"><p id="session-budget">Одновременно до 2 бесед</p><button id="edit-plan" class="work-button">План DAG</button><button id="generate-plan" class="work-button">ИИ-план</button></div></details>
               <details class="composer-menu"><summary>Прикрепить по пути⌄</summary><div class="menu-panel"><input id="attachment-paths" placeholder="Путь к файлу" aria-label="Пути вложений"><button id="add-paths" class="work-button">Добавить</button></div></details>
               <span class="input-spacer"></span><button id="cancel-agents" class="work-button" disabled>Остановить</button><button id="start-agents" class="work-button primary" title="Ctrl+Enter">Начать задачу ↑</button>
             </div>
-          </div><div class="input-caption">Изолированные копии проекта · команды и запись исходников требуют подтверждения</div>
+          </div><div class="composer-meta"><span id="work-token-count" title="Приблизительно один токен на четыре символа">≈ 0 токенов</span><span id="work-pet-status" role="status">Готов к работе</span></div><div class="input-caption" id="access-hint">Команды и изменения — с вашего подтверждения</div>
         </div>
       </div>
       <aside id="inspector" hidden><div id="inspector-resize" class="panel-resize inspector-resize" role="separator" aria-label="Ширина панели кода" tabindex="0"></div><header class="inspector-tabs"><button data-tab="changes" class="active">Файлы <span id="change-count">0</span></button><button data-tab="terminal">Терминал</button><button data-tab="logs">Действия</button><button id="close-inspector" aria-label="Закрыть панель">×</button></header>
@@ -77,10 +81,14 @@
       <section class="welcome" id="welcome"><div class="hero-mark"><svg><use href="#i-star"/></svg><span class="orbit orbit-one"></span><span class="orbit orbit-two"></span></div><div class="welcome-kicker">EVIL GEMINI</div><h2>Большие идеи.<br><span>Без лишнего шума.</span></h2><p>Задайте вопрос. Разберитесь в сложном.<br>Создайте что-нибудь своё.</p><div class="suggestions"><button data-prompt="Помоги разобраться в архитектуре моего проекта. С чего начать?">Разобраться в коде <span>↗</span></button><button data-prompt="Помоги развить идею. Начни с трёх вопросов о том, что я хочу создать.">Развить идею <span>↗</span></button><button data-prompt="Помоги мне изучить сложную тему. Сначала спроси, что я хочу понять.">Изучить новое <span>↗</span></button></div></section>
       <div class="messages" id="messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
     </div>
-    <div class="composer-zone"><div class="notice" id="notice" role="status" hidden></div><form id="composer" class="composer"><textarea id="prompt" rows="1" placeholder="Спросите о чём угодно…" aria-label="Сообщение" maxlength="60000"></textarea><div class="composer-bottom"><span class="composer-provider"><svg><use href="#i-star"/></svg>AI Mode <span class="tiny-dot"></span><span id="composer-hint">Текстовый диалог</span></span><div class="composer-actions"><span class="enter-hint" id="enter-hint">Enter <span>↵</span></span><button id="send" class="send" type="submit" aria-label="Отправить сообщение" disabled><svg><use href="#i-arrow"/></svg></button></div></div></form><div class="footnote"><span>Место для ваших мыслей. Сила Google AI Mode.</span><span>Ответы ИИ стоит проверять</span></div></div>
+    <div class="composer-zone"><div class="notice" id="notice" role="status" hidden></div><form id="composer" class="composer"><pre class="composer-pet" role="img" aria-label="Синий ASCII-помощник">  .----.
+ / o  o \
+ |  --  |
+ '------'
+   /__\</pre><textarea id="prompt" rows="1" placeholder="Спросите о чём угодно…" aria-label="Сообщение" maxlength="60000"></textarea><div class="composer-bottom"><span class="composer-provider"><svg><use href="#i-star"/></svg>AI Mode <span class="tiny-dot"></span><span id="composer-hint">Текстовый диалог</span></span><div class="composer-actions"><span class="enter-hint" id="enter-hint">Enter <span>↵</span></span><button id="send" class="send" type="submit" aria-label="Отправить сообщение" disabled><svg><use href="#i-arrow"/></svg></button></div></div></form><div class="footnote"><span id="chat-token-count" title="Оценка объёма видимой истории и черновика, не расход Google">≈ 0 токенов</span><span>Оценка текста · ответы ИИ стоит проверять</span></div></div>
   </main>
 </div>
-<dialog id="settings-dialog"><div class="dialog-heading"><div><span class="eyebrow">ПОД ВАШ РИТМ</span><h2>Настройки</h2></div><button class="icon-button" id="close-settings" aria-label="Закрыть настройки"><svg><use href="#i-x"/></svg></button></div><div class="setting-row"><div><strong>Матовое стекло</strong><p>Прозрачность и мягкий блюр окна</p></div><button id="blur-toggle" class="switch" role="switch" aria-checked="true" aria-label="Матовое стекло"><span></span></button></div><div class="setting-row"><div><strong>Размер текста</strong><p>Комфортное чтение ответов</p></div><select id="font-size" aria-label="Размер текста"><option value="14">Компактный</option><option value="15">Обычный</option><option value="17">Крупный</option></select></div><div class="about"><svg><use href="#i-star"/></svg><div><strong>EVIL GEMINI</strong><p>Ваш интерфейс к Google AI Mode.<br>Диалоги сохраняются локально.</p></div><span>0.2</span></div></dialog>
+<dialog id="settings-dialog"><div class="dialog-heading"><div><span class="eyebrow">ПОД ВАШ РИТМ</span><h2>Настройки</h2></div><button class="icon-button" id="close-settings" aria-label="Закрыть настройки"><svg><use href="#i-x"/></svg></button></div><div class="setting-row"><div><strong>Матовое стекло</strong><p>Мягкий блюр и полупрозрачные поверхности</p></div><button id="blur-toggle" class="switch" role="switch" aria-checked="true" aria-label="Матовое стекло"><span></span></button></div><div class="setting-row"><div><strong>Размер текста</strong><p>Комфортное чтение ответов</p></div><select id="font-size" aria-label="Размер текста"><option value="14">Компактный</option><option value="15">Обычный</option><option value="17">Крупный</option></select></div><div class="about"><svg><use href="#i-star"/></svg><div><strong>EVIL GEMINI</strong><p>Ваш интерфейс к Google AI Mode.<br>Диалоги сохраняются локально.</p></div><span>0.1.1</span></div></dialog>
 <dialog id="plan-dialog"><h2>План задач (DAG)</h2><p>Независимые задачи выполняются параллельно. Циклы и неизвестные зависимости отклоняются.</p><textarea id="plan-json" rows="14" aria-label="План JSON" placeholder="Оставьте пустым для стандартного плана анализа, реализации и проверки."></textarea><button id="save-plan" class="work-button primary">Сохранить план</button><button id="close-plan" class="work-button">Закрыть</button></dialog>
 <dialog id="attachment-dialog"><h2 id="attachment-title"></h2><div id="attachment-preview"></div><button id="close-attachment" class="work-button">Закрыть</button></dialog>
 <div id="toast" class="toast" role="status"></div>

@@ -197,30 +197,47 @@ impl SessionFactory for ChromeFactory {
 
 struct StructuredCompletion {
     value: Option<serde_json::Value>,
+    plain: String,
+    plain_changed: std::time::Instant,
     changed: std::time::Instant,
 }
 impl StructuredCompletion {
     fn new() -> Self {
         Self {
             value: None,
+            plain: String::new(),
+            plain_changed: std::time::Instant::now(),
             changed: std::time::Instant::now(),
         }
     }
     fn observe(&mut self, snapshot: &crate::ai_mode::Snapshot, fresh: bool) -> bool {
         if !fresh {
             self.value = None;
+            self.plain.clear();
+            self.plain_changed = std::time::Instant::now();
             self.changed = std::time::Instant::now();
             return false;
         }
+        if self.plain != snapshot.text {
+            self.plain = snapshot.text.clone();
+            self.plain_changed = std::time::Instant::now();
+        }
+        // An ordinary answer is not executable tool output. Return a settled
+        // answer to the protocol repair loop rather than waiting three minutes.
+        let settled = !snapshot.generating
+            && !snapshot.draft
+            && snapshot.text.chars().count() >= 40
+            && self.plain_changed.elapsed() >= Duration::from_secs(8);
         let Ok(value) = super::protocol::decode::<serde_json::Value>(&snapshot.text) else {
-            return false;
+            return settled;
         };
+
         let envelope = (value["summary"].is_string()
             && value["done"].is_boolean()
             && value["actions"].is_array())
             || value["tasks"].is_array();
         if !envelope {
-            return false;
+            return settled;
         }
         if self.value.as_ref() != Some(&value) {
             self.value = Some(value);
@@ -235,11 +252,26 @@ struct ChromeSession {
     root: Arc<Mutex<Option<Browser>>>,
     uploaded: bool,
     input: Arc<Mutex<()>>,
-    last_completed: Option<serde_json::Value>,
+    last_completed: Option<String>,
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_stable_answer_returns_to_repair_but_active_generation_does_not() {
+        let mut completion = StructuredCompletion::new();
+        let mut snapshot = crate::ai_mode::Snapshot {
+            text: "Here is a complete tutorial instead of the requested tool protocol.".into(),
+            ..Default::default()
+        };
+        assert!(!completion.observe(&snapshot, true));
+        completion.plain_changed = std::time::Instant::now() - Duration::from_secs(9);
+        snapshot.generating = true;
+        assert!(!completion.observe(&snapshot, true));
+        snapshot.generating = false;
+        assert!(completion.observe(&snapshot, true));
+        assert!(!completion.observe(&snapshot, false));
+    }
     #[test]
     fn structured_completion_requires_new_valid_stable_payload_and_idle_controls() {
         let mut completion = StructuredCompletion::new();
@@ -348,10 +380,12 @@ impl ModelSession for ChromeSession {
             let before = self.ai.snapshot().await.map_err(classify)?;
             let verified = self.last_completed.as_ref().is_some_and(|last| {
                 !before.generating
-                    && super::protocol::decode::<serde_json::Value>(&before.text)
-                        .ok()
-                        .as_ref()
-                        == Some(last)
+                    && (last == &before.text || {
+                        let old = super::protocol::decode::<serde_json::Value>(last).ok();
+                        let current =
+                            super::protocol::decode::<serde_json::Value>(&before.text).ok();
+                        old.is_some() && old == current
+                    })
             });
             let mut turn = if verified {
                 self.ai.send_after_completed(prompt, &before.text).await
@@ -364,10 +398,11 @@ impl ModelSession for ChromeSession {
             let mut structured = StructuredCompletion::new();
             loop {
                 let snapshot = self.ai.snapshot().await.map_err(classify)?;
+                if !snapshot.error.is_empty(){return Err(classify(anyhow::anyhow!(snapshot.error)));}
                 // A complete JSON envelope is an agent protocol boundary, even when
                 // Google's code-only response omits the usual prose footer marker.
                 if structured.observe(&snapshot, turn.is_new_response(&snapshot)) {
-                    self.last_completed = super::protocol::decode(&snapshot.text).ok();
+                    self.last_completed = Some(snapshot.text.clone());
                     return Ok(snapshot.text);
                 }
                 let (text, done) = match turn.update(snapshot) {
@@ -385,7 +420,7 @@ impl ModelSession for ChromeSession {
                     });
                 }
                 if done {
-                    self.last_completed = super::protocol::decode(&text).ok();
+                    self.last_completed = Some(text.clone());
                     return Ok(text);
                 }
                 tokio::time::sleep(Duration::from_millis(600)).await;

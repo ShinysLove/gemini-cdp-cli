@@ -6,6 +6,11 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 pub const START_URL: &str = "https://www.google.com/search?udm=50";
+fn submission_accepted(before:&Snapshot,after:&Snapshot)->bool{
+    // Old code-only replies can keep the heuristic busy flag set forever.
+    // That is not evidence that the new prompt was sent.
+    !after.draft || after.response_count>before.response_count
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -203,11 +208,7 @@ impl AiMode {
             if !current.error.is_empty() {
                 bail!("{}", current.error);
             }
-            if !current.draft
-                || current.busy
-                || current.response_count > snapshot.response_count
-                || current.text != snapshot.text
-            {
+            if submission_accepted(&snapshot,&current) {
                 return Ok(Turn::new(snapshot, self.response_timeout));
             }
         }
@@ -287,6 +288,12 @@ impl AiMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_busy_reply_is_not_confirmation_of_a_new_submission(){
+        let before=Snapshot{text:"old answer".into(),busy:true,response_count:1,..Default::default()};
+        let mut after=Snapshot{text:"old answer with a new footer".into(),draft:true,busy:true,response_count:1,..Default::default()};
+        assert!(!submission_accepted(&before,&after));after.draft=false;assert!(submission_accepted(&before,&after));after.draft=true;after.response_count=2;assert!(submission_accepted(&before,&after));
+    }
     #[test]
     fn rejects_lookalike_hosts() {
         assert!(is_search_url(START_URL));

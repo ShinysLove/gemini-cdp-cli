@@ -71,6 +71,8 @@ impl ModelSession for Session {
             serde_json::json!({"summary":"Stage a file","done":false,"actions":[{"tool":"write_file","path":target,"content":value}]})
         } else if self.round == 1 && prompt.contains("CHECK:") {
             serde_json::json!({"summary":"Inspect dependency file","done":false,"actions":[{"tool":"read_file","path":"a.txt"}]})
+        } else if self.round == 1 {
+            serde_json::json!({"summary":"Inspect actual files","done":false,"actions":[{"tool":"list_directory","path":"."}]})
         } else {
             serde_json::json!({"summary":if prompt.contains("\"output\":\"A\""){"Dependency contents verified"}else{"Completed"},"done":true,"actions":[]})
         };
@@ -457,4 +459,130 @@ async fn applying_source_requires_approval_and_rechecks_concurrent_edits() {
         std::fs::read_to_string(source.path().join("a.txt")).unwrap(),
         "user edit"
     );
+}
+struct DriftFactory;
+struct DriftSession(usize);
+#[async_trait]
+impl SessionFactory for DriftFactory {
+    async fn create(&self) -> anyhow::Result<Box<dyn ModelSession>> {
+        Ok(Box::new(DriftSession(0)))
+    }
+}
+#[async_trait]
+impl ModelSession for DriftSession {
+    async fn ask(
+        &mut self,
+        prompt: &str,
+        _: &[Attachment],
+        _: &CancellationToken,
+        _: &EventBus,
+        _: &str,
+    ) -> Result<String, ModelError> {
+        self.0 += 1;
+        match self.0 {
+            1 => {
+                assert!(prompt.contains("Read-only stage"));
+                Ok(serde_json::json!({"summary":"Wrongly initialize project","done":false,"actions":[{"tool":"write_file","path":"should-not-exist.rs","content":"bad"}]}).to_string())
+            }
+            2 => {
+                assert!(prompt.contains("read-only stage"));
+                Ok("Here is an ordinary tutorial. It is not an executable tool response.".into())
+            }
+            3=>{assert!(prompt.contains("Format correction"));Ok(serde_json::json!({"summary":"Inspect the actual directory","done":false,"actions":[{"tool":"list_directory","path":"."}]}).to_string())},
+            _ => {
+                Ok(serde_json::json!({"summary":"Inspection complete; workspace empty","done":true,"actions":[]}).to_string())
+            }
+        }
+    }
+}
+#[tokio::test]
+async fn analysis_cannot_write_and_protocol_drift_is_repaired_without_losing_scope() {
+    let source = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let prefs = AgentPreferences {
+        workers: 1,
+        max_sessions: 1,
+        min_request_interval_secs: 0,
+        ..Default::default()
+    };
+    let sessions = SessionManager::with_factory(Arc::new(DriftFactory), &prefs);
+    let manager = AgentManager::new(sessions, prefs, data.path().into(), EventBus::default());
+    manager
+        .start(
+            "Create a Rust application".into(),
+            source.path().into(),
+            vec![],
+            Some(TaskPlan {
+                tasks: vec![task(
+                    "architecture",
+                    "Inspect the empty directory; report findings only",
+                    &[],
+                )],
+            }),
+        )
+        .await
+        .unwrap();
+    let run = finish(&manager).await;
+    assert_eq!(run.state, ExecutionState::Succeeded);
+    assert!(run.changes.is_empty());
+    assert!(!source.path().join("should-not-exist.rs").exists());
+    assert!(run.agents[0]
+        .history
+        .iter()
+        .any(|m| m.role == "tool" && m.content.contains("read-only")));
+    assert!(run.agents[0].input_chars > 0 && run.agents[0].output_chars > 0);
+}
+struct ClaimFactory;
+struct ClaimSession;
+#[async_trait]
+impl SessionFactory for ClaimFactory {
+    async fn create(&self) -> anyhow::Result<Box<dyn ModelSession>> {
+        Ok(Box::new(ClaimSession))
+    }
+}
+#[async_trait]
+impl ModelSession for ClaimSession {
+    async fn ask(
+        &mut self,
+        _: &str,
+        _: &[Attachment],
+        _: &CancellationToken,
+        _: &EventBus,
+        _: &str,
+    ) -> Result<String, ModelError> {
+        Ok(serde_json::json!({"summary":"I read and changed everything without using tools","done":true,"actions":[]}).to_string())
+    }
+}
+#[tokio::test]
+async fn unsupported_model_claims_are_not_reported_as_successful_work() {
+    let source = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let prefs = AgentPreferences {
+        workers: 1,
+        max_sessions: 1,
+        min_request_interval_secs: 0,
+        max_retries: 1,
+        ..Default::default()
+    };
+    let sessions = SessionManager::with_factory(Arc::new(ClaimFactory), &prefs);
+    let manager = AgentManager::new(sessions, prefs, data.path().into(), EventBus::default());
+    manager
+        .start(
+            "Read files".into(),
+            source.path().into(),
+            vec![],
+            Some(TaskPlan {
+                tasks: vec![task("check", "Read actual files", &[])],
+            }),
+        )
+        .await
+        .unwrap();
+    let result = finish(&manager).await;
+    assert_eq!(result.state, ExecutionState::Failed);
+    assert!(result.agents[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Unverified completion"));
+    assert!(result.agents[0].output.is_none());
 }

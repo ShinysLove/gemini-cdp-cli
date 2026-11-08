@@ -10,6 +10,11 @@
     if (!input && /AI Mode (?:isn.t|is not) available|AI Mode is not supported|Режим ИИ недоступен/i.test(body)) error = 'Google AI Mode недоступен для этого региона или аккаунта.';
     if (all('[role="alert"]').filter(visible).some(el=>/too many requests|quota exceeded|rate limit|лимит.*(?:исчерпан|достигнут)|слишком много запросов/i.test(el.innerText || ''))) error = 'RATE_LIMITED: Google reported a quota/rate limit';
     if (location.hostname === 'consent.google.com') error = 'В Chrome открыт экран согласия Google. Завершите его вручную.';
+    // Google can render a completed refusal instead of a response block. Only
+    // inspect its own fallback region in the newest turn, never prompt text.
+    const latestTurn = all('[data-container-id]').filter(el => /^\d+$/.test(el.getAttribute('data-container-id') || '')).at(-1);
+    const fallback = all('[data-subtree="aimfl"]').filter(visible).at(-1);
+    if (fallback && fallback.closest('[data-container-id]') === latestTurn && /не уда[её]тся дать ответ на этот поисковый запрос|can.t (?:answer|respond to) this (?:search|query)|unable to (?:answer|respond)/i.test(fallback.innerText || '')) error = 'SERVICE_REFUSAL: Google AI Mode не смог ответить на этот запрос. Успешные этапы и рабочие копии сохранены; ответ не засчитан как выполненная задача.';
     if (operation === 'fill') {
         if (!input) throw new Error('Поле AI Mode не найдено');
         input.focus();
