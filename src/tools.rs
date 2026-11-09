@@ -899,7 +899,29 @@ pub fn validate_patch(root: &Path, patch: &str) -> Result<()> {
         bail!("Patch exceeds 1 MiB");
     }
     let mut headers = 0;
+    let mut hunks = 0;
+    // Remaining old/new lines of the current hunk. Inside a hunk, a removed
+    // "-- comment" line reads as "--- comment" and is content, not a header.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
     for line in patch.lines() {
+        if old_left > 0 || new_left > 0 {
+            match line.as_bytes().first() {
+                Some(b' ') | None => {
+                    old_left = old_left.saturating_sub(1);
+                    new_left = new_left.saturating_sub(1);
+                }
+                Some(b'-') => old_left = old_left.saturating_sub(1),
+                Some(b'+') => new_left = new_left.saturating_sub(1),
+                Some(b'\\') => {}
+                _ => bail!("Malformed hunk body"),
+            }
+            continue;
+        }
+        if let Some(range) = line.strip_prefix("@@ ") {
+            (old_left, new_left) = hunk_counts(range)?;
+            hunks += 1;
+            continue;
+        }
         if line.starts_with("rename ")
             || line.starts_with("copy ")
             || line.contains("mode 120000")
@@ -938,10 +960,28 @@ pub fn validate_patch(root: &Path, patch: &str) -> Result<()> {
             }
         }
     }
-    if headers < 2 || headers % 2 != 0 || !patch.lines().any(|l| l.starts_with("@@ ")) {
+    if headers < 2 || headers % 2 != 0 || hunks == 0 {
         bail!("A complete unified patch with file headers and hunks is required");
     }
     Ok(())
+}
+/// Line counts from a hunk header body such as "-1,3 +1,4 @@".
+fn hunk_counts(range: &str) -> Result<(usize, usize)> {
+    let mut parts = range.split_whitespace();
+    let mut count = |sign: char| -> Result<usize> {
+        let part = parts
+            .next()
+            .and_then(|p| p.strip_prefix(sign))
+            .context("Malformed hunk header")?;
+        Ok(match part.split_once(',') {
+            Some((_, n)) => n.parse()?,
+            None => {
+                part.parse::<usize>()?;
+                1
+            }
+        })
+    };
+    Ok((count('-')?, count('+')?))
 }
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
@@ -1087,6 +1127,15 @@ mod tests {
         ] {
             assert!(scoped(root.path(), p).is_err(), "{p}");
         }
+    }
+    #[test]
+    fn hunk_lines_resembling_headers_are_content() {
+        let root = tempfile::tempdir().unwrap();
+        let patch = "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++ counter\n select 1;\n";
+        validate_patch(root.path(), patch).unwrap();
+        let removed = "--- a/q.sql\n+++ b/q.sql\n@@ -1 +0,0 @@\n--- note\n";
+        validate_patch(root.path(), removed).unwrap();
+        assert!(validate_patch(root.path(), "--- a/x\n+++ b/x\n@@ bad @@\n").is_err());
     }
     #[test]
     fn stale_changes_cannot_overwrite_user_edits() {
