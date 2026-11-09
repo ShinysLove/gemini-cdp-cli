@@ -369,6 +369,15 @@ async fn worker(
     ));
     let mut poll = tokio::time::interval(Duration::from_millis(450));
     loop {
+        // A dead CDP socket never recovers; drop it so "init"/"show_browser" reconnect.
+        if provider.as_ref().is_some_and(|ai| !ai.is_connected()) {
+            provider = None;
+            session.interrupt();
+            session.phase = "error";
+            session.status = "Соединение с Chrome потеряно".into();
+            session.error = "Соединение с Chrome потеряно. Нажмите значок Google AI Mode, чтобы переподключиться.".into();
+            session.emit(false);
+        }
         tokio::select! {
             command=rx.recv()=>{
                 let Some(command)=command else {break};
@@ -468,7 +477,7 @@ async fn worker(
                                 let url=session.history.active().map(|c|c.url.clone()).unwrap_or_default();
                                 let result=if url.is_empty(){connected.new_chat().await}else{connected.open_chat(&url).await};
                                 provider=Some(connected);
-                                session.phase="ready";session.status="Google AI Mode подключён".into();
+                                session.phase="ready";session.status="Google AI Mode подключён".into();session.error.clear();
                                 if let Err(error)=result{session.phase="error";session.error=format!("Не удалось восстановить вкладку: {error:#}");}
                                 session.emit(false);
                             }

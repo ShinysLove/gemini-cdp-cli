@@ -33,6 +33,7 @@ pub struct Browser {
     request_id: u64,
     rate_limited: bool,
     retry_after_secs: u64,
+    closed: bool,
 }
 
 impl Browser {
@@ -126,13 +127,25 @@ impl Browser {
         self.request_id += 1;
         let id = self.request_id;
         timeout(Duration::from_secs(15), async {
-            self.ws
+            if let Err(error) = self
+                .ws
                 .send(Message::Text(
                     json!({"id":id,"method":method,"params":params}).to_string(),
                 ))
-                .await?;
+                .await
+            {
+                self.closed = true;
+                return Err(error.into());
+            }
             while let Some(message) = self.ws.next().await {
-                match message? {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(error) => {
+                        self.closed = true;
+                        return Err(error.into());
+                    }
+                };
+                match message {
                     Message::Text(text) => {
                         let value: Value = serde_json::from_str(&text)?;
                         if value["method"] == "Network.responseReceived"
@@ -151,10 +164,14 @@ impl Browser {
                         }
                     }
                     Message::Ping(data) => self.ws.send(Message::Pong(data)).await?,
-                    Message::Close(_) => bail!("Chrome закрыл соединение"),
+                    Message::Close(_) => {
+                        self.closed = true;
+                        bail!("Chrome закрыл соединение")
+                    }
                     _ => {}
                 }
             }
+            self.closed = true;
             Err(anyhow!("Соединение с Chrome закрыто"))
         })
         .await
@@ -192,8 +209,13 @@ impl Browser {
             request_id: 0,
             rate_limited: false,
             retry_after_secs: 0,
+            closed: false,
         };
         Ok(browser)
+    }
+    /// True once the CDP WebSocket has failed or closed; it never recovers.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
     pub async fn browser_endpoint(cfg: &Config) -> Result<String> {
         let value: Value = reqwest::Client::builder()

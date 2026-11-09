@@ -174,6 +174,7 @@ impl AiMode {
         if let Some(wait)=self.browser.take_rate_limit(){bail!("RATE_LIMITED:{wait}: Google returned HTTP 429");}
         Ok(value)
     }
+    pub fn is_connected(&self) -> bool { !self.browser.is_closed() }
     pub fn set_challenge_handler(&mut self, handler: std::sync::Arc<dyn Fn(bool) + Send + Sync>) { self.challenge_handler = Some(handler); }
     pub async fn wait_ready(&mut self) -> Result<()> {
         let mut started = Instant::now();
