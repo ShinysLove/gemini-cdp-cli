@@ -324,11 +324,12 @@ impl Drop for ChromeSession {
 }
 fn classify(error: anyhow::Error) -> ModelError {
     let text = format!("{error:#}");
-    if text.contains("RATE_LIMITED") {
+    if let Some((_, rest)) = text.split_once("RATE_LIMITED:") {
+        // "RATE_LIMITED:30: ..." carries Retry-After; error context may precede it.
         ModelError::RateLimited(
-            text.split(':')
-                .nth(1)
-                .and_then(|n| n.parse().ok())
+            rest.split(':')
+                .next()
+                .and_then(|n| n.trim().parse().ok())
                 .unwrap_or(0),
         )
     } else {
