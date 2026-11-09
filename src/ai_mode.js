@@ -38,7 +38,12 @@
     if (captcha) error = 'Google запросил CAPTCHA. Пройдите проверку вручную в Chrome.';
     if (!input && /AI Mode (?:isn.t|is not) available|AI Mode is not supported|Режим ИИ недоступен/i.test(body)) error = 'Google AI Mode недоступен для этого региона или аккаунта.';
     if (all('[role="alert"]').filter(visible).some(el=>/too many requests|quota exceeded|rate limit|лимит.*(?:исчерпан|достигнут)|слишком много запросов/i.test(el.innerText || ''))) error = 'RATE_LIMITED: Google reported a quota/rate limit';
-    if (location.hostname === 'consent.google.com') error = 'В Chrome открыт экран согласия Google. Завершите его вручную.';
+    // Google shows cookie consent either as a redirect or as a modal over the
+    // search page; the modal leaves the input visible but blocks submission.
+    const consent = location.hostname === 'consent.google.com'
+        || all('form[action*="consent.google"], iframe[src*="consent.google"]').some(visible)
+        || all('[role="dialog"], [aria-modal="true"]').filter(visible).some(el => /Прежде чем перейти к Google|Before you continue to Google/i.test(el.innerText || ''));
+    if (consent) error = 'В Chrome открыт экран согласия Google на cookie. Выберите вариант вручную.';
     // Google can render a completed refusal instead of a response block. Only
     // inspect its own fallback region in the newest turn, never prompt text.
     const latestTurn = all('[data-container-id]').filter(el => /^\d+$/.test(el.getAttribute('data-container-id') || '')).at(-1);
@@ -121,7 +126,7 @@
     const nativeBlocks = !!response && (response.blocks.some(block=>block.matches('.n6owBd')) || (!!scope.getAttribute('data-container-id') && scope.getAttribute('data-container-id') !== 'main-col'));
     const complete = !!response && (nativeBlocks ? !!finalMarker || hasActions
         : scope.getAttribute('data-complete') === 'true' || hasActions);
-    return { captcha, ready: !!input, draft: !!(input?.value ?? input?.textContent ?? '').trim(), text: scope ? markdown(scope).replace(/\n{3,}/g,'\n\n').trim() : '',
+    return { captcha, consent, ready: !!input, draft: !!(input?.value ?? input?.textContent ?? '').trim(), text: scope ? markdown(scope).replace(/\n{3,}/g,'\n\n').trim() : '',
         generating: all(config.stop_selector).some(visible),
         response_count: responses.length, busy: all(config.stop_selector).some(visible)
             || (nativeBlocks && !complete),

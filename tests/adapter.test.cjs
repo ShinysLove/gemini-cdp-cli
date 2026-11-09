@@ -68,6 +68,22 @@ test('CAPTCHA is detected from challenge URL and visible embedded widget',()=>{
     assert.equal(snapshot.captcha,true);assert.match(snapshot.error,/CAPTCHA/);
   }
 });
+
+test('cookie consent is detected as a redirect and as a modal over the search page',()=>{
+  const config={input_selector:'inputs',response_selector:'responses',stop_selector:'stop',complete_selector:'actions'};
+  const run=(url,dialogs)=>{
+    const input=new Element('textarea');
+    const globals={URL,location:new URL(url),getComputedStyle:()=>({visibility:'visible'}),Node:{TEXT_NODE:3,ELEMENT_NODE:1},document:{body:{innerText:''},querySelector:()=>null,querySelectorAll:selector=>selector==='inputs'?[input]:selector.includes('role="dialog"')?dialogs:[]}};
+    return vm.runInNewContext('('+fs.readFileSync('src/ai_mode.js','utf8')+')',globals)(config,'snapshot','');
+  };
+  const modal=new Element('div',[text('Прежде чем перейти к Google')],{role:'dialog'});
+  for (const snapshot of [run('https://consent.google.com/ml',[]),run('https://www.google.com/search?udm=50',[modal])]) {
+    assert.equal(snapshot.consent,true);assert.match(snapshot.error,/согласия/);
+  }
+  const other=new Element('div',[text('Settings')],{role:'dialog'});
+  const clean=run('https://www.google.com/search?udm=50',[other]);
+  assert.equal(clean.consent,false);assert.equal(clean.error,'');
+});
 test('upload action opens the native attachment control when input is lazy',()=>{
   let clicked=false;const button=new Element('button',[],{'aria-label':'Прикрепить фото'});button.click=()=>clicked=true;
   const adapter=vm.runInNewContext('('+fs.readFileSync('src/ai_mode.js','utf8')+')',{URL,location:new URL('https://www.google.com/search?udm=50'),getComputedStyle:()=>({visibility:'visible'}),document:{querySelector:()=>null,querySelectorAll:selector=>selector==='button, [role="button"]'?[button]:[]}});

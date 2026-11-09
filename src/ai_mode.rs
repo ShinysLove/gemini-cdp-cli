@@ -51,6 +51,8 @@ pub struct Snapshot {
     pub draft: bool,
     #[serde(default)]
     pub captcha: bool,
+    #[serde(default)]
+    pub consent: bool,
     #[serde(skip)]
     pub paused: Duration,
     #[serde(default)]
@@ -155,7 +157,7 @@ impl AiMode {
     }
     pub async fn snapshot(&mut self) -> Result<Snapshot> {
         let mut value: Snapshot = serde_json::from_value(self.script("snapshot", "").await?)?;
-        if value.captcha {
+        if value.captcha || value.consent {
             let started = Instant::now();
             if let Some(handler) = &self.challenge_handler { handler(true); }
             let result = async {
@@ -163,7 +165,7 @@ impl AiMode {
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     let current: Snapshot = serde_json::from_value(self.script("snapshot", "").await?)?;
-                    if !current.captcha && current.ready && is_search_url(&current.url) { return Ok::<_, anyhow::Error>(current); }
+                    if !current.captcha && !current.consent && current.ready && is_search_url(&current.url) { return Ok::<_, anyhow::Error>(current); }
                 }
             }.await;
             if let Some(handler) = &self.challenge_handler { handler(false); }

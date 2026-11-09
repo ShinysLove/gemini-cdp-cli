@@ -218,7 +218,7 @@ pub fn run() -> Result<()> {
                 ));
             }
             Event::UserEvent(UiEvent::Challenge(active)) => {
-                let notice = if active { "Google запросил CAPTCHA. Пройдите проверку в Chrome. Приложение дождётся её завершения." } else { "Проверка завершена. Продолжаем работу." };
+                let notice = if active { "Google запросил проверку (CAPTCHA или согласие на cookie). Завершите её в окне Chrome — приложение дождётся." } else { "Проверка завершена. Продолжаем работу." };
                 let value = serde_json::to_string(notice).unwrap();
                 let _ = webview.evaluate_script(&format!("window.challengeNotice({value}, {active})"));
                 if !active { window.set_minimized(false); window.set_focus(); }
