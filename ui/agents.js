@@ -70,7 +70,7 @@ window.agentReceive=event=>{switch(event.type){
  case 'error':if(applyingRunId&&!applyApprovalId){applyingRunId=null;updateApplyButton();}$('agent-notice').textContent=WorkbenchCore.diagnosis(event.data);planning=false;$('generate-plan').disabled=false;$('terminal-form').querySelector('button').disabled=false;if(!codingRun||finalStates.has(codingRun.state)){$('start-agents').disabled=false;$('cancel-agents').disabled=true;}$('terminal-stop').disabled=true;break;
  case 'plan':planning=false;$('start-agents').disabled=false;$('cancel-agents').disabled=true;codingPlan=event.data;$('plan-json').value=JSON.stringify(codingPlan,null,2);$('generate-plan').disabled=false;$('plan-dialog').showModal();break;
  case 'attachment':$('agent-notice').textContent=`${event.data.name} · загрузка ${event.data.progress}%`;break;
- case 'attachments':codingFiles=event.data;for(const id of ['chat-attachments','attachment-list'])$(id).innerHTML=codingFiles.map(attachmentMarkup).join('');break;
+ case 'attachments':codingFiles=event.data;chatHasAttachments=codingFiles.length>0;updateSend();for(const id of ['chat-attachments','attachment-list'])$(id).innerHTML=codingFiles.map(attachmentMarkup).join('');break;
  }};
 let workerSaveTimer;$('agent-count').oninput=()=>{$('agent-value').textContent=$('agent-count').value;clearTimeout(workerSaveTimer);workerSaveTimer=setTimeout(()=>sendCommand('set_workers',{workers:Number($('agent-count').value)}),150);};
 $('choose-workspace').onclick=()=>sendCommand('choose_workspace');$('choose-attachments').onclick=()=>sendCommand('choose_attachments');$('add-paths').onclick=()=>{if($('attachment-paths').value.trim()){sendCommand('attach_paths',{text:$('attachment-paths').value});$('attachment-paths').value='';closeComposerMenus();}};

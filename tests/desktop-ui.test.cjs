@@ -106,3 +106,22 @@ test('canceling or failing application leaves changes available for another atte
 });
 
 test('path attachment submits on Enter and closes the open composer menu',()=>{const {elements,commands,context}=boot();const menu={open:true};context.document.querySelectorAll=selector=>selector.includes('[open]')&&menu.open?[menu]:[];elements.get('attachment-paths').value='C:/file.txt';elements.get('attachment-paths').listeners.keydown({key:'Enter',preventDefault(){}});assert.deepEqual(commands.at(-1),{action:'attach_paths',text:'C:/file.txt'});assert.equal(elements.get('attachment-paths').value,'');assert.equal(menu.open,false);});
+
+test('a file-only chat can be submitted and removing the last file disables send',()=>{
+ const {context,elements,commands}=boot();
+ context.window.receive({chats:[],active_id:'',phase:'ready',busy:false,settings:{blur:true,font_size:15}});
+ assert.equal(elements.get('send').disabled,true);
+ context.window.agentReceive({type:'attachments',data:[{id:'notes',name:'notes.txt',size:12}]});
+ assert.equal(elements.get('send').disabled,false);
+ elements.get('composer').listeners.submit({preventDefault(){}});
+ assert.deepEqual(commands.at(-1),{action:'send',text:''});
+ context.window.receive({chats:[],active_id:'',phase:'ready',busy:false,settings:{blur:true,font_size:15}});
+ context.window.agentReceive({type:'attachments',data:[]});
+ assert.equal(elements.get('send').disabled,true);
+});
+
+test('Google button requests the existing browser action',()=>{
+ const {elements,commands}=boot();
+ elements.get('open-google').onclick();
+ assert.deepEqual(commands.at(-1),{action:'show_browser'});
+});

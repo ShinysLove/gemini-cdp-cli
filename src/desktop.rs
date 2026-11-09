@@ -521,11 +521,14 @@ async fn worker(
                         if session.phase!="ready" { session.error="Сначала откройте новый диалог или восстановите подключение к Google.".into();session.emit(false);continue; }
                         if session.turn.is_some(){continue;}
                         let retry=command.action=="retry";
-                        let text=if retry {session.history.active().and_then(|c|c.messages.iter().rev().find(|m|m.role=="user")).map(|m|m.text.clone()).unwrap_or_default()} else {command.text.trim().to_owned()};
-                        if text.is_empty(){continue;}
+                        let mut text=if retry {session.history.active().and_then(|c|c.messages.iter().rev().find(|m|m.role=="user")).map(|m|m.text.clone()).unwrap_or_default()} else {command.text.trim().to_owned()};
                         if text.len()>240_000 {session.error="Сообщение слишком длинное".into();session.emit(false);continue;}
                         session.error.clear();
                         let sent_attachments = if retry {session.history.active().and_then(|c|c.messages.iter().rev().find(|m|m.role=="user")).map(|m|m.attachments.clone()).unwrap_or_default()} else {attachments.clone()};
+                        if text.is_empty() {
+                            if sent_attachments.is_empty() { continue; }
+                            text = "Изучи приложенные файлы.".into();
+                        }
                         let mut attachment_error=None;for attachment in &sent_attachments{if let Err(error)=attachment.verify().await{attachment_error=Some(error);break;}}
                         if let Some(error)=attachment_error{session.fail(error);continue;}
                         let native:Vec<_>=sent_attachments.iter().filter(|a|a.native_upload).map(|a|a.stored_path.clone()).collect();

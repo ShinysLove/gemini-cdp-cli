@@ -3,12 +3,13 @@ const $ = id => document.getElementById(id);
 const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
 let state = {chats:[],active_id:'',status:'Подключение',phase:'connecting',busy:false,settings:{blur:true,font_size:15}};
 let signature = '', listSignature = '', toastTimer, sending = false;
+let chatHasAttachments = false;
 const drafts = new Map();
 const sendCommand = (action, extra={}) => window.ipc?.postMessage(JSON.stringify({action,...extra}));
 const escape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(text) { $('toast').textContent=text; $('toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('toast').classList.remove('visible'),2400); }
 function resizeInput(){const el=$('prompt');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,170)+'px';updateSend();}
-function updateSend(){const ready=state.phase==='ready';$('send').disabled=state.busy?false:sending||!ready||!$('prompt').value.trim();$('send').classList.toggle('stopping',state.busy);$('send').innerHTML=icon(state.busy?'square':'arrow');$('send').setAttribute('aria-label',state.busy?'Прекратить ожидание':'Отправить сообщение');$('enter-hint').hidden=state.busy;$('composer-hint').textContent=state.busy?'Готовим ответ…':sending?'Отправляем…':'Текстовый диалог';}
+function updateSend(){const ready=state.phase==='ready';$('send').disabled=state.busy?false:sending||!ready||(!$('prompt').value.trim()&&!chatHasAttachments);$('send').classList.toggle('stopping',state.busy);$('send').innerHTML=icon(state.busy?'square':'arrow');$('send').setAttribute('aria-label',state.busy?'Прекратить ожидание':'Отправить сообщение');$('enter-hint').hidden=state.busy;$('composer-hint').textContent=state.busy?'Готовим ответ…':sending?'Отправляем…':'Текстовый диалог';}
 function sidebar(){const query=$('search').value.toLocaleLowerCase();const chats=state.chats.filter(c=>c.messages.length&&c.title.toLocaleLowerCase().includes(query));const key=JSON.stringify([chats.map(c=>[c.id,c.title]),state.active_id,query]);if(key===listSignature)return;listSignature=key;$('chat-count').textContent=state.chats.filter(c=>c.messages.length).length;$('chat-list').innerHTML=chats.length?chats.map(chat=>`<button class="chat-item ${chat.id===state.active_id?'active':''}" data-chat="${escape(chat.id)}" title="${escape(chat.title)}">${icon('chat')}<span>${escape(chat.title)}</span></button>`).join(''):`<div class="empty-history">${query?'Ничего не найдено':'Ваши разговоры будут здесь.<br>Начните с первого вопроса.'}</div>`;}
 window.receive = incoming => {
  if(incoming.toast){toast(incoming.toast);return;}
@@ -37,7 +38,7 @@ window.receive = incoming => {
 };
 $('prompt').addEventListener('input',resizeInput);
 $('prompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}});
-$('composer').addEventListener('submit',event=>{event.preventDefault();if(state.busy){sendCommand('stop');return;}const text=$('prompt').value.trim();if(text&&state.phase==='ready'&&!sending){sending=true;$('prompt').readOnly=true;updateSend();sendCommand('send',{text});}});
+$('composer').addEventListener('submit',event=>{event.preventDefault();if(state.busy){sendCommand('stop');return;}const text=$('prompt').value.trim();if((text||chatHasAttachments)&&state.phase==='ready'&&!sending){sending=true;$('prompt').readOnly=true;updateSend();sendCommand('send',{text});}});
 const newChat=()=>sendCommand('new');$('new-chat').onclick=newChat;$('brand').onclick=newChat;
 $('search').oninput=sidebar;
 $('chat-list').onclick=event=>{const item=event.target.closest('[data-chat]');if(item)sendCommand('select',{id:item.dataset.chat});};
