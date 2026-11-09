@@ -104,3 +104,5 @@ test('canceling or failing application leaves changes available for another atte
  context.window.agentReceive({type:'apply_status',data:{run_id:completed.id,state:'failed',message:'Отменено'}});assert.equal(elements.get('apply-agent-changes').disabled,false);
  context.window.agentReceive({type:'archive',data:{...completed,applied:true},live:false});assert.equal(elements.get('apply-agent-changes').disabled,true);
 });
+
+test('path attachment submits on Enter and closes the open composer menu',()=>{const {elements,commands,context}=boot();const menu={open:true};context.document.querySelectorAll=selector=>selector.includes('[open]')&&menu.open?[menu]:[];elements.get('attachment-paths').value='C:/file.txt';elements.get('attachment-paths').listeners.keydown({key:'Enter',preventDefault(){}});assert.deepEqual(commands.at(-1),{action:'attach_paths',text:'C:/file.txt'});assert.equal(elements.get('attachment-paths').value,'');assert.equal(menu.open,false);});

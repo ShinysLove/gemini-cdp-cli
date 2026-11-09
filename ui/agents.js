@@ -73,7 +73,7 @@ window.agentReceive=event=>{switch(event.type){
  case 'attachments':codingFiles=event.data;for(const id of ['chat-attachments','attachment-list'])$(id).innerHTML=codingFiles.map(attachmentMarkup).join('');break;
  }};
 let workerSaveTimer;$('agent-count').oninput=()=>{$('agent-value').textContent=$('agent-count').value;clearTimeout(workerSaveTimer);workerSaveTimer=setTimeout(()=>sendCommand('set_workers',{workers:Number($('agent-count').value)}),150);};
-$('choose-workspace').onclick=()=>sendCommand('choose_workspace');$('choose-attachments').onclick=()=>sendCommand('choose_attachments');$('add-paths').onclick=()=>{if($('attachment-paths').value.trim()){sendCommand('attach_paths',{text:$('attachment-paths').value});$('attachment-paths').value='';}};
+$('choose-workspace').onclick=()=>sendCommand('choose_workspace');$('choose-attachments').onclick=()=>sendCommand('choose_attachments');$('add-paths').onclick=()=>{if($('attachment-paths').value.trim()){sendCommand('attach_paths',{text:$('attachment-paths').value});$('attachment-paths').value='';closeComposerMenus();}};
 $('attachment-list').onclick=event=>{const remove=event.target.closest('[data-remove]');if(remove)sendCommand('remove_attachment',{id:remove.dataset.remove});const preview=event.target.closest('[data-preview]');if(preview){const file=codingFiles.find(f=>f.id===preview.dataset.preview);showAttachment(file);}};
 $('close-attachment').onclick=()=>$('attachment-dialog').close();
 $('start-agents').onclick=()=>{const goal=$('coding-goal').value.trim();if(!goal){$('coding-goal').focus();return;}archived=false;planning=false;$('agent-notice').textContent='Подготовка изолированных копий…';$('start-agents').disabled=true;sendCommand('set_workers',{workers:Number($('agent-count').value)});sendCommand('agent_start',{id:goal,text:codingPlan?JSON.stringify(codingPlan):''});$('worker-menu').open=false;};
@@ -99,3 +99,12 @@ function showApplyApproval(request){
 function decideApply(allowed){if(!applyApprovalId)return;const id=applyApprovalId;applyApprovalId=null;$('apply-confirm').disabled=true;$('apply-cancel').disabled=true;$('apply-dialog').close();$('agent-notice').textContent=allowed?'Применяем изменения…':'Отменяем применение…';sendCommand('approval',{id,allowed});}
 $('apply-confirm').onclick=()=>decideApply(true);$('apply-cancel').onclick=()=>decideApply(false);
 $('apply-dialog').addEventListener('cancel',event=>{event.preventDefault();decideApply(false);});
+
+// <details> menus stay open until their summary is clicked again, and both
+// panels share one position. Keep one open at a time; Esc or a click outside closes it.
+function closeComposerMenus(except){let closed=null;document.querySelectorAll('details.composer-menu[open]').forEach(menu=>{if(menu!==except){menu.open=false;closed=menu;}});return closed;}
+document.querySelectorAll('details.composer-menu').forEach(menu=>menu.addEventListener('toggle',()=>{if(menu.open)closeComposerMenus(menu);}));
+document.addEventListener('pointerdown',event=>{if(!event.target.closest?.('details.composer-menu'))closeComposerMenus();});
+// Capture phase: Esc closes the menu first instead of also stopping a running reply.
+document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;const closed=closeComposerMenus();if(closed){event.preventDefault();event.stopImmediatePropagation();closed.querySelector('summary')?.focus();}},true);
+$('attachment-paths').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();$('add-paths').onclick();}});
