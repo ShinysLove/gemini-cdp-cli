@@ -116,8 +116,9 @@ pub async fn run(cfg: Config) -> Result<()> {
                 }
                 Some(Ok(Event::Mouse(mouse)))if matches!(mouse.kind,MouseEventKind::Down(MouseButton::Left)|MouseEventKind::Drag(MouseButton::Left))&&mouse.row==slider.y=>{count=slider_value(mouse.column,slider);manager.set_workers(count).await?;manager.preferences.read().await.save(&prefs_path)?;}
                 Some(Ok(Event::Key(key)))if key.kind!=KeyEventKind::Release=>{
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&key.code==KeyCode::Char('c'){manager.cancel().await;break;}
-                    if key.modifiers.contains(KeyModifiers::CONTROL)&&matches!(key.code,KeyCode::Char('a')|KeyCode::Char('d')){if let Some(id)=pending.keys().next().cloned(){manager.approvals.decide(&id,key.code==KeyCode::Char('a')).await;}continue;}
+                    let ctrl=key.modifiers.contains(KeyModifiers::CONTROL)&&!key.modifiers.contains(KeyModifiers::ALT);
+                    if ctrl&&key.code==KeyCode::Char('c'){manager.cancel().await;break;}
+                    if ctrl&&matches!(key.code,KeyCode::Char('a')|KeyCode::Char('d')){if let Some(id)=pending.keys().next().cloned(){manager.approvals.decide(&id,key.code==KeyCode::Char('a')).await;}continue;}
                     match key.code{
                         KeyCode::Tab=>slider_focus=!slider_focus,
                         KeyCode::Left|KeyCode::Right|KeyCode::Home|KeyCode::End if slider_focus=>{count=match key.code{KeyCode::Left=>count.saturating_sub(1).max(1),KeyCode::Right=>(count+1).min(50),KeyCode::Home=>1,_=>50};manager.set_workers(count).await?;manager.preferences.read().await.save(&prefs_path)?;}
@@ -136,7 +137,8 @@ pub async fn run(cfg: Config) -> Result<()> {
                             else {let manager=manager.clone();let workspace=workspace.clone();let files=attachments.clone();let plan=plan.clone();tokio::spawn(async move{if let Err(error)=manager.start(text,workspace,files,plan).await{manager.bus.publish(AgentEvent::Error(error.to_string()));}});}
                             input.clear();
                         }
-                        KeyCode::Char(c) if !slider_focus&&!key.modifiers.contains(KeyModifiers::CONTROL)=>input.push(c),
+                        // Windows reports AltGr as Ctrl+Alt; those characters are text too.
+                        KeyCode::Char(c) if !slider_focus&&(!key.modifiers.contains(KeyModifiers::CONTROL)||key.modifiers.contains(KeyModifiers::ALT))=>input.push(c),
                         _=>{}
                     }
                 }

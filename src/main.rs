@@ -169,7 +169,8 @@ async fn main() -> Result<()> {
                         (KeyCode::Backspace, _) => {state.input.pop();},
                         (KeyCode::Up, _) => state.scroll = state.scroll.saturating_add(2),
                         (KeyCode::Down, _) => state.scroll = state.scroll.saturating_sub(2),
-                        (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => state.input.push(c),
+                        // Windows reports AltGr as Ctrl+Alt; those characters are text too.
+                        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) => state.input.push(c),
                         _ => {}
                     }
                 },
