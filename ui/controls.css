@@ -61,3 +61,8 @@ button { transition:background-color 180ms ease,color 180ms ease,border-color 18
 
 .about-description span[lang] { display:block;line-height:1.7; }
 .about-description span[lang=en] { margin-top:8px;color:var(--muted); }
+
+/* Control labels are not copyable text: a slight drag on a button selected its
+   label (or dragged its image) instead of registering the click. */
+button, summary, [role="button"], [role="tab"], label { -webkit-user-select: none; user-select: none; }
+button img, summary img { -webkit-user-drag: none; }
